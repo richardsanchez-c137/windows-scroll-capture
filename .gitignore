@@ -1,0 +1,34 @@
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+.vscode/
+*.suo
+*.user
+*.VC.db
+*.VC.VC.opendb
+
+# Compiled binaries
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+*.ilk
+
+# MSBuild
+[Bb]in/
+[Oo]bj/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+
+# User-specific configuration
+CMakeUserPresets.json
