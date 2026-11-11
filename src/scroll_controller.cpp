@@ -3,6 +3,7 @@
 #include "scroll_capture.hpp"
 
 #include <windows.h>
+#include <windowsx.h>
 #include <ole2.h>
 #include <gdiplus.h>
 
@@ -38,7 +39,7 @@ struct ControllerState {
     std::unique_ptr<Gdiplus::Bitmap> previewBitmap;
     std::wstring previewPath;
 
-    RECT previewRect{20, 65, 540, 350};
+    RECT previewRect{20, 105, 540, 380};
 
     bool capturePending = false;
 };
@@ -78,6 +79,13 @@ void updateButtons(ControllerState* state) {
     );
 }
 
+HBRUSH getControllerBackgroundBrush() {
+    static HBRUSH brush =
+        CreateSolidBrush(RGB(24, 27, 34));
+
+    return brush;
+}
+
 
 bool refreshPreview(
     HWND hwnd,
@@ -94,7 +102,7 @@ bool refreshPreview(
 
     std::wstring path;
 
-    if (!state->session->SaveStitchedPng(path, error)) {
+    if (!state->session->SaveStitchedPng(path, error, true)) {
         return false;
     }
 
@@ -335,7 +343,7 @@ LRESULT CALLBACK controllerWindowProc(
             L"STATIC",
             L"Initial screenshot captured. Tap Capture More.",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            18, 18, 520, 38,
+            18, 58, 520, 38,
             hwnd, nullptr, instance, nullptr
         );
 
@@ -344,8 +352,8 @@ LRESULT CALLBACK controllerWindowProc(
             L"BUTTON",
             L"Capture More",
             WS_CHILD | WS_VISIBLE |
-                WS_TABSTOP | BS_PUSHBUTTON,
-            15, 85, 130, 42,
+                WS_TABSTOP | BS_OWNERDRAW,
+            15, 360, 160, 44,
             hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(ID_CAPTURE_MORE)
@@ -359,8 +367,8 @@ LRESULT CALLBACK controllerWindowProc(
             L"BUTTON",
             L"Finish && Save",
             WS_CHILD | WS_VISIBLE |
-                WS_TABSTOP | BS_PUSHBUTTON,
-            155, 85, 130, 42,
+                WS_TABSTOP | BS_OWNERDRAW,
+            190, 360, 160, 44,
             hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(ID_FINISH_SAVE)
@@ -374,8 +382,8 @@ LRESULT CALLBACK controllerWindowProc(
             L"BUTTON",
             L"Cancel",
             WS_CHILD | WS_VISIBLE |
-                WS_TABSTOP | BS_PUSHBUTTON,
-            295, 85, 115, 42,
+                WS_TABSTOP | BS_OWNERDRAW,
+            365, 360, 160, 44,
             hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(ID_CANCEL)
@@ -392,9 +400,75 @@ LRESULT CALLBACK controllerWindowProc(
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
 
+    case WM_CTLCOLORSTATIC: {
+         HDC dc = reinterpret_cast<HDC>(wParam);
+
+        SetTextColor(dc, RGB(226, 232, 240));
+        SetBkColor(dc, RGB(24, 27, 34));
+        SetBkMode(dc, OPAQUE);
+
+        return reinterpret_cast<LRESULT>(
+            getControllerBackgroundBrush()
+        );
+    }
+
     case WM_PAINT: {
     PAINTSTRUCT ps{};
     HDC hdc = BeginPaint(hwnd, &ps);
+
+    RECT client{};
+GetClientRect(hwnd, &client);
+
+RECT header{0, 0, client.right, 42};
+
+HBRUSH headerBrush =
+    CreateSolidBrush(RGB(31, 35, 44));
+
+FillRect(hdc, &header, headerBrush);
+DeleteObject(headerBrush);
+
+SetBkMode(hdc, TRANSPARENT);
+SetTextColor(hdc, RGB(235, 238, 245));
+
+HFONT titleFont = CreateFontW(
+    -17, 0, 0, 0, FW_SEMIBOLD,
+    FALSE, FALSE, FALSE,
+    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+    DEFAULT_PITCH | FF_DONTCARE,
+    L"Segoe UI"
+);
+
+HGDIOBJ oldFont = SelectObject(hdc, titleFont);
+
+TextOutW(
+    hdc,
+    18,
+    12,
+    L"Windows Scroll Capture",
+    22
+);
+
+SelectObject(hdc, oldFont);
+DeleteObject(titleFont);
+
+// Draw the custom close icon.
+HPEN closePen = CreatePen(
+    PS_SOLID,
+    2,
+    RGB(190, 195, 205)
+);
+
+oldFont = SelectObject(hdc, closePen);
+
+MoveToEx(hdc, client.right - 27, 14, nullptr);
+LineTo(hdc, client.right - 15, 26);
+
+MoveToEx(hdc, client.right - 15, 14, nullptr);
+LineTo(hdc, client.right - 27, 26);
+
+SelectObject(hdc, oldFont);
+DeleteObject(closePen);
 
     if (state) {
         RECT& area = state->previewRect;
@@ -479,6 +553,53 @@ LRESULT CALLBACK controllerWindowProc(
     return 0;
 }
 
+    case WM_NCHITTEST: {
+    POINT point{
+        GET_X_LPARAM(lParam),
+        GET_Y_LPARAM(lParam)
+    };
+
+    ScreenToClient(hwnd, &point);
+
+    RECT client{};
+    GetClientRect(hwnd, &client);
+
+    if (
+        point.y >= 0 &&
+        point.y < 42 &&
+        point.x < client.right - 44
+    ) {
+        return HTCAPTION;
+    }
+
+    return HTCLIENT;
+}
+
+    case WM_LBUTTONUP: {
+        const int x = GET_X_LPARAM(lParam);
+        const int y = GET_Y_LPARAM(lParam);
+
+        RECT client{};
+        GetClientRect(hwnd, &client);
+
+        if (
+            x >= client.right - 44 &&
+            y >= 0 &&
+            y < 42
+        ) {
+            KillTimer(hwnd, CAPTURE_SETTLE_TIMER);
+
+            if (state) {
+                state->session.reset();
+            }
+
+            DestroyWindow(hwnd);
+            return 0;
+        }
+
+        break;
+    }
+
     case WM_COMMAND:
         if (!state) {
             return 0;
@@ -503,6 +624,97 @@ LRESULT CALLBACK controllerWindowProc(
 
         return 0;
 
+    case WM_DRAWITEM: {
+        auto* item =
+            reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+
+        if (!item || item->CtlType != ODT_BUTTON) {
+            return FALSE;
+        }
+
+        COLORREF fill{};
+        const wchar_t* label = L"";
+
+        switch (item->CtlID) {
+        case ID_CAPTURE_MORE:
+            fill = RGB(53, 120, 210);
+            label = L"Capture More";
+            break;
+
+        case ID_FINISH_SAVE:
+            fill = RGB(35, 145, 105);
+            label = L"Finish && Save";
+            break;
+
+        case ID_CANCEL:
+            fill = RGB(60, 67, 78);
+            label = L"Cancel";
+            break;
+
+        default:
+            return FALSE;
+        }
+
+        if (item->itemState & ODS_DISABLED) {
+            fill = RGB(55, 60, 68);
+        }
+        else if (item->itemState & ODS_SELECTED) {
+            fill = RGB(35, 45, 60);
+        }
+
+        HBRUSH brush = CreateSolidBrush(fill);
+        HPEN pen = CreatePen(PS_SOLID, 1, fill);
+
+        HGDIOBJ oldBrush =
+            SelectObject(item->hDC, brush);
+
+        HGDIOBJ oldPen =
+            SelectObject(item->hDC, pen);
+
+        const RECT& r = item->rcItem;
+
+        RoundRect(
+            item->hDC,
+            r.left,
+            r.top,
+            r.right,
+            r.bottom,
+            10,
+            10
+        );
+
+        SelectObject(item->hDC, oldBrush);
+        SelectObject(item->hDC, oldPen);
+
+        DeleteObject(brush);
+        DeleteObject(pen);
+
+        SetBkMode(item->hDC, TRANSPARENT);
+
+        SetTextColor(
+            item->hDC,
+            RGB(255, 255, 255)
+        );
+
+        RECT textRect = r;
+
+        DrawTextW(
+            item->hDC,
+            label,
+            -1,
+            &textRect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE
+        );
+
+        if (item->itemState & ODS_FOCUS) {
+            RECT focusRect = r;
+            InflateRect(&focusRect, -5, -5);
+            DrawFocusRect(item->hDC, &focusRect);
+        }
+
+        return TRUE;
+    }
+
     case WM_TIMER:
         if (
             wParam == CAPTURE_SETTLE_TIMER &&
@@ -520,6 +732,18 @@ LRESULT CALLBACK controllerWindowProc(
 
             if (!success) {
                 setStatus(state, error);
+                updateButtons(state);
+                return 0;
+            }
+
+            std::wstring previewError;
+
+            if (!refreshPreview(hwnd, state, previewError)) {
+                setStatus(
+                    state,
+                    L"Frame captured, but preview refresh failed."
+                );
+
                 updateButtons(state);
                 return 0;
             }
@@ -598,6 +822,17 @@ void runScrollController(const RECT& captureRegion) {
         return;
     }
 
+    if (!refreshPreview(nullptr, &state, error)) {
+        MessageBoxW(
+            nullptr,
+            error.c_str(),
+            L"Windows Scroll Capture - Preview Error",
+            MB_OK | MB_ICONWARNING
+        );
+
+        return;
+    }
+
     HINSTANCE instance = GetModuleHandleW(nullptr);
 
     WNDCLASSEXW windowClass{};
@@ -606,7 +841,7 @@ void runScrollController(const RECT& captureRegion) {
     windowClass.hInstance = instance;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground =
-        reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        getControllerBackgroundBrush();
     windowClass.lpszClassName = WINDOW_CLASS;
 
     if (
@@ -617,7 +852,7 @@ void runScrollController(const RECT& captureRegion) {
     }
 
     constexpr int windowWidth = 560;
-    constexpr int windowHeight = 475;
+    constexpr int windowHeight = 455;
 
     const int virtualLeft =
         GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -658,9 +893,7 @@ void runScrollController(const RECT& captureRegion) {
             WS_EX_NOACTIVATE,
         WINDOW_CLASS,
         L"Windows Scroll Capture",
-        WS_OVERLAPPED |
-            WS_CAPTION |
-            WS_SYSMENU,
+        WS_POPUP,
         x,
         y,
         windowWidth,
