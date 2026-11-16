@@ -2,84 +2,98 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(
-    WindowsScrollCapture
+    WindowsSnipTool
     VERSION 0.1.0
-    DESCRIPTION "Scrolling screenshot utility for Windows"
+    DESCRIPTION "Native Windows screenshot and scrolling capture application"
     LANGUAGES CXX
 )
 
+# ============================================================
+# Build requirements
+# ============================================================
+
 if(NOT WIN32)
-    message(FATAL_ERROR "Windows Scroll Capture only supports Windows.")
+    message(FATAL_ERROR "Windows Snip Tool requires Windows.")
 endif()
 
-add_executable(Scroller WIN32
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "Windows Snip Tool requires an x64 build.")
+endif()
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# ============================================================
+# Application target
+# ============================================================
+
+add_executable(WindowsSnipTool WIN32
     src/main.cpp
-    src/region_selector.cpp
-    src/scroll_controller.cpp
-    src/scroll_capture.cpp
+    src/graphics_runtime.cpp
+    src/window_renderer.cpp
+    src/capture_runtime.cpp
+    src/logger.cpp
+)
+target_include_directories(WindowsSnipTool PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
-target_compile_features(Scroller PRIVATE cxx_std_17)
-
-target_include_directories(Scroller PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-target_compile_definitions(Scroller PRIVATE
+target_compile_definitions(WindowsSnipTool PRIVATE
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
-    _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
+    WINVER=0x0A00
+    _WIN32_WINNT=0x0A00
 )
 
-target_link_libraries(Scroller PRIVATE
+# ============================================================
+# Windows SDK libraries
+# ============================================================
+
+target_link_libraries(WindowsSnipTool PRIVATE
     user32
-    windowsapp
-    runtimeobject
-    gdiplus
-)
-
-if(MSVC)
-    target_compile_options(Scroller PRIVATE
-        /W4
-        /permissive-
-        /EHsc
-        /Zc:__cplusplus
-    )
-endif()
-
-set_target_properties(Scroller PROPERTIES
-    OUTPUT_NAME "WindowsScrollCapture"
-)
-
-
-# Development-only Windows UI Automation diagnostic.
-add_executable(UiaProbe
-    tests/uia_probe.cpp
-)
-
-target_compile_features(UiaProbe PRIVATE cxx_std_17)
-
-target_compile_definitions(UiaProbe PRIVATE
-    UNICODE
-    _UNICODE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-)
-
-target_link_libraries(UiaProbe PRIVATE
-    UIAutomationCore
+    gdi32
     ole32
-    oleaut32
-    user32
+    d2d1
+    dwrite
+    windowscodecs
+    d3d11
+    dxgi
+    windowsapp
 )
 
+# ============================================================
+# Compiler configuration
+# ============================================================
+
 if(MSVC)
-    target_compile_options(UiaProbe PRIVATE
+    target_compile_options(WindowsSnipTool PRIVATE
         /W4
         /permissive-
         /EHsc
         /Zc:__cplusplus
+        /utf-8
+    )
+
+    target_compile_options(WindowsSnipTool PRIVATE
+        $<$<CONFIG:Release>:/O2>
     )
 endif()
+
+# ============================================================
+# Output configuration
+# ============================================================
+
+set_target_properties(WindowsSnipTool PROPERTIES
+    OUTPUT_NAME "WindowsSnipTool"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+message(STATUS "==========================================")
+message(STATUS " Windows Snip Tool")
+message(STATUS " Version: ${PROJECT_VERSION}")
+message(STATUS " C++ Standard: C++20")
+message(STATUS " Architecture: x64")
+message(STATUS "==========================================")

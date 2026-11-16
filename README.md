@@ -1,67 +1,54 @@
-# Windows Scroll Capture
+# Windows Snip Tool
 
-A native Windows C++ application designed to bring scrolling screenshot functionality to the Windows Snipping Tool workflow.
+A native Windows screenshot application built with C++20.
 
-## Current Version
-
-0.1.0 - Project initialization.
-
-## Goals
-
-- Integrate with the native Windows Snipping Tool capture workflow.
-- Capture long, vertically scrolling content.
-- Automatically scroll supported windows.
-- Detect overlapping image regions.
-- Stitch captured frames into one continuous screenshot.
-- Export screenshots as PNG and JPEG.
+The project aims to reproduce the familiar Windows Snipping Tool
+experience while adding a dedicated scrolling screenshot capability.
 
 ## Technology Stack
 
-- C++17
+- C++20
 - Win32 API
-- CMake
-- Windows SDK
+- Direct2D
+- DirectWrite
+- Direct3D 11
+- DXGI
 - Windows Graphics Capture
-- OpenCV (planned)
-- MSIX packaging
+- C++/WinRT
+- Windows Imaging Component (WIC)
+- CMake
+- MSVC
 
-## Project Structure
+## Current Implementation
 
-```text
-.
-├── CMakeLists.txt
-├── README.md
-├── .gitignore
-├── include/
-│   └── scroller/
-├── src/
-├── tests/
-├── packaging/
-├── docs/
-└── assets/
-```
+- Native Windows application window
+- Dark-themed Snipping Tool-style interface
+- Screenshot and video mode selection UI
+- Rectangle, Window, Full Screen and Freeform mode selection UI
+- Capture delay selection UI (0, 3, 5 and 10 seconds)
+- Direct2D rendering
+- Application logging
+- Direct3D 11 device initialization
+- High-performance GPU selection through DXGI
+- NVIDIA RTX 4050 hardware acceleration verified
+- Direct3D-to-WinRT device interop
+- Windows Graphics Capture support verification
 
-## Development Roadmap
+**Note:** Actual frame acquisition, screenshot saving,
+recording and scrolling capture are still under development.
+The current mode selectors are UI functionality only.
 
-| Milestone | Description | Status |
-|---|---|---|
-| M0 | Project initialization and Git setup | In progress |
-| M1 | Snipping Tool integration and callback | Pending |
-| M2 | Screen capture engine | Pending |
-| M3 | Automatic scrolling engine | Pending |
-| M4 | OpenCV image stitching | Pending |
-| M5 | Floating capture toolbar | Pending |
-| M6 | Export and packaging | Pending |
+## Requirements
 
-## Build
+- Windows 10 version 2004 or later (Windows Graphics Capture)
+- Windows SDK 10.0.26100.0
+- Visual Studio C++ desktop development tools
+- CMake 3.25 or newer
+- x64 build environment
 
-Use a Visual Studio Developer Command Prompt:
+## Build Instructions
+
+Configure:
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64
-cmake --build build --config Debug
-```
-
-## License
-
-To be determined.
+cmake -S . -B build

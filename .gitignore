@@ -1,34 +1,33 @@
-# Build directories
-build/
-out/
-cmake-build-*/
+# CMake build output
+/build/
+/cmake-build-*/
+/out/
 
 # Visual Studio
 .vs/
-.vscode/
-*.suo
 *.user
+*.suo
 *.VC.db
 *.VC.VC.opendb
 
-# Compiled binaries
+# Compiled binaries and intermediate files
 *.exe
 *.dll
-*.lib
 *.obj
 *.pdb
 *.ilk
+*.pch
+*.tlog/
 
-# MSBuild
-[Bb]in/
-[Oo]bj/
+# Debug and release output
+Debug/
+Release/
+x64/
+Win32/
 
-# CMake generated files
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-CTestTestfile.cmake
-Makefile
+# Logs
+*.log
 
-# User-specific configuration
-CMakeUserPresets.json
+# Windows metadata
+Thumbs.db
+Desktop.ini

@@ -1,242 +1,475 @@
-
 #include <windows.h>
-#include <appmodel.h>
-#include <string>
-#include "region_selector.hpp"
 #include <winrt/base.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.ApplicationModel.h>
-#include <winrt/Windows.ApplicationModel.Activation.h>
-#include <winrt/Windows.ApplicationModel.DataTransfer.h>
-#include <winrt/Windows.Storage.h>
-#include <winrt/Windows.System.h>
-#include "scroll_controller.hpp"
+#include <string>
+
+#include "graphics/graphics_runtime.hpp"
+#include "graphics/window_renderer.hpp"
+#include "core/logger.hpp"
+#include "capture/capture_runtime.hpp"
 
 
-// Safely retrieve a query parameter from the callback URI.
-std::wstring getQueryValue(
-    const winrt::Windows::Foundation::Uri& uri,
-    const wchar_t* name
+namespace {
+
+constexpr wchar_t WINDOW_CLASS_NAME[] =
+    L"WindowsSnipTool.MainWindow";
+
+constexpr wchar_t WINDOW_TITLE[] =
+    L"Windows Snip Tool";
+
+constexpr COLORREF BACKGROUND_COLOR =
+    RGB(24, 27, 33);
+
+LRESULT CALLBACK MainWindowProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam
 ) {
-    try {
-        const auto query = uri.QueryParsed();
+    switch (message) {
 
-        return query.GetFirstValueByName(name).c_str();
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_NCCREATE: {
+        const auto* createInfo =
+            reinterpret_cast<CREATESTRUCTW*>(lParam);
+
+        SetWindowLongPtrW(
+            hwnd,
+            GWLP_USERDATA,
+            reinterpret_cast<LONG_PTR>(
+                createInfo->lpCreateParams
+            )
+        );
+
+        return TRUE;
     }
-    catch (const winrt::hresult_error&) {
-        return {};
-    }
-}
 
-// Display the Snipping Tool callback result.
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        BeginPaint(hwnd, &ps);
 
-void handleCaptureResponse(
-    const winrt::Windows::Foundation::Uri& uri
-) {
-    const std::wstring code =
-        getQueryValue(uri, L"code");
+        auto* renderer =
+            reinterpret_cast<windows_snip::WindowRenderer*>(
+                GetWindowLongPtrW(hwnd, GWLP_USERDATA)
+            );
 
-    const std::wstring reason =
-        getQueryValue(uri, L"reason");
-
-    const std::wstring fileToken =
-        getQueryValue(uri, L"file-access-token");
-
-    std::wstring message;
-
-    if (code == L"200" && !fileToken.empty()) {
-        try {
-            // Redeem the one-time token to obtain the captured image.
-            const auto capturedFile =
-                winrt::Windows::ApplicationModel::DataTransfer::
-                    SharedStorageAccessManager::
-                        RedeemTokenForFileAsync(fileToken).get();
-
-            // Get this application's persistent local storage folder.
-            const auto localFolder =
-                winrt::Windows::Storage::ApplicationData::
-                    Current().LocalFolder();
-
-            // Copy the captured image into our application storage.
-            const auto savedFile = capturedFile.CopyAsync(
-                localFolder,
-                capturedFile.Name(),
-                winrt::Windows::Storage::
-                    NameCollisionOption::GenerateUniqueName
-            ).get();
-
-            message =
-                L"Screenshot captured and saved successfully!\n\n";
-
-            message += L"File name:\n";
-            message += savedFile.Name().c_str();
-
-            message += L"\n\nSaved location:\n";
-            message += savedFile.Path().c_str();
+        if (renderer) {
+            renderer->Render();
         }
-        catch (const winrt::hresult_error& error) {
-            message =
-                L"Capture succeeded, but saving the image failed.\n\n";
 
-            message += error.message().c_str();
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_SIZE: {
+        auto* renderer =
+            reinterpret_cast<windows_snip::WindowRenderer*>(
+                GetWindowLongPtrW(hwnd, GWLP_USERDATA)
+            );
+
+        if (renderer) {
+            renderer->Resize(
+                static_cast<UINT>(LOWORD(lParam)),
+                static_cast<UINT>(HIWORD(lParam))
+            );
         }
-    }
-    else {
-        message = L"Snipping Tool capture failed or was cancelled.\n\n";
 
-        message += L"Status code: ";
-        message += code.empty() ? L"Unknown" : code;
-
-        message += L"\n\nReason: ";
-        message += reason.empty() ? L"Not provided" : reason;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
     }
 
-    MessageBoxW(
-        nullptr,
-        message.c_str(),
-        L"Windows Scroll Capture - Screenshot Result",
-        MB_OK | MB_ICONINFORMATION
+    case WM_LBUTTONUP: {
+        auto* renderer =
+            reinterpret_cast<windows_snip::WindowRenderer*>(
+                GetWindowLongPtrW(hwnd, GWLP_USERDATA)
+            );
+
+        if (renderer) {
+            renderer->HandleMouseButtonUp(
+                static_cast<float>(LOWORD(lParam)),
+                static_cast<float>(HIWORD(lParam))
+            );
+        }
+
+        return 0;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+
+    return DefWindowProcW(
+        hwnd,
+        message,
+        wParam,
+        lParam
     );
 }
 
+bool InitializeDpiAwareness() {
 
-// Launch Snipping Tool using the packaged application's identity.
-bool launchSnippingTool() {
+    if (SetProcessDpiAwarenessContext(
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    )) {
+        return true;
+    }
 
-    const winrt::Windows::Foundation::Uri captureUri{
-        L"ms-screenclip://capture/image"
-        L"?rectangle"
-        L"&enabledModes=SnippingAllModes"
-        L"&user-agent=WindowsScrollCapture"
-        L"&api-version=1.2"
-        L"&redirect-uri=scroller://capture-response"
-    };
+    // ERROR_ACCESS_DENIED can indicate that DPI awareness
+    // was already configured by the application manifest.
+    if (GetLastError() == ERROR_ACCESS_DENIED) {
+        return true;
+    }
 
-    return winrt::Windows::System::Launcher::
-        LaunchUriAsync(captureUri).get();
+    return false;
 }
+
+bool RegisterMainWindowClass(HINSTANCE instance) {
+
+    WNDCLASSEXW windowClass{};
+
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.style = CS_HREDRAW | CS_VREDRAW;
+    windowClass.lpfnWndProc = MainWindowProc;
+    windowClass.hInstance = instance;
+    windowClass.hCursor = LoadCursorW(
+        nullptr,
+        IDC_ARROW
+    );
+    windowClass.hIcon = LoadIconW(
+        nullptr,
+        IDI_APPLICATION
+    );
+    windowClass.lpszClassName = WINDOW_CLASS_NAME;
+
+    return RegisterClassExW(&windowClass) != 0;
+}
+
+} // namespace
 
 int WINAPI wWinMain(
-    HINSTANCE,
+    HINSTANCE instance,
     HINSTANCE,
     PWSTR,
-    int
+    int showCommand
 ) {
+    // 1. Configure per-monitor DPI awareness.
+    if (!InitializeDpiAwareness()) {
+        MessageBoxW(
+            nullptr,
+            L"Could not initialize DPI awareness.",
+            WINDOW_TITLE,
+            MB_OK | MB_ICONERROR
+        );
+
+        return 1;
+    }
+
+    // Initialize application logging.
+    windows_snip::Logger logger;
+
+    std::wstring loggerError;
+
+    if (logger.Initialize(loggerError)) {
+        logger.Write(
+            windows_snip::LogLevel::Info,
+            L"Windows Snip Tool application starting."
+        );
+    }
+    else {
+        OutputDebugStringW(
+            L"Warning: Application logging could not be initialized.\n"
+        );
+        OutputDebugStringW(loggerError.c_str());
+        OutputDebugStringW(L"\n");
+    }
+
+   // Initialize COM and the Windows Runtime.
     try {
-        // Establish physical screen-coordinate awareness before
-        // creating any windows or performing screen capture.
-        if (!SetProcessDpiAwarenessContext(
-            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-        )) {
-            const DPI_AWARENESS awareness =
-                GetAwarenessFromDpiAwarenessContext(
-                    GetThreadDpiAwarenessContext()
-                );
-
-            if (awareness != DPI_AWARENESS_PER_MONITOR_AWARE) {
-                MessageBoxW(
-                    nullptr,
-                    L"Could not establish Per-Monitor DPI awareness.",
-                    L"Windows Scroll Capture - DPI Error",
-                    MB_OK | MB_ICONERROR
-                );
-
-                return 1;
-            }
-        }
-
         winrt::init_apartment(
-            winrt::apartment_type::multi_threaded
+            winrt::apartment_type::single_threaded
+        );
+    }
+    catch (const winrt::hresult_error& runtimeError) {
+
+        const auto runtimeMessage = runtimeError.message();
+
+        logger.Write(
+            windows_snip::LogLevel::Error,
+            L"Windows Runtime initialization failed."
         );
 
+        MessageBoxW(
+            nullptr,
+            runtimeMessage.c_str(),
+            WINDOW_TITLE,
+            MB_OK | MB_ICONERROR
+        );
 
-// Detect whether this process has MSIX package identity.
-UINT32 packageNameLength = 0;
+        logger.Shutdown();
+        return 1;
+    }
 
-const LONG packageStatus =
-    GetCurrentPackageFullName(&packageNameLength, nullptr);
 
-const bool isPackaged =
-    packageStatus == ERROR_INSUFFICIENT_BUFFER;
+    // Initialize the shared graphics runtime.
+    windows_snip::WindowRenderer renderer;
+    windows_snip::GraphicsRuntime graphics;
 
-if (
-    packageStatus != ERROR_INSUFFICIENT_BUFFER &&
-    packageStatus != APPMODEL_ERROR_NO_PACKAGE
-) {
-    throw winrt::hresult_error(
-        HRESULT_FROM_WIN32(packageStatus)
+    std::wstring graphicsError;
+
+    if (!graphics.Initialize(graphicsError)) {
+        MessageBoxW(
+            nullptr,
+            graphicsError.c_str(),
+            WINDOW_TITLE,
+            MB_OK | MB_ICONERROR
+        );
+
+        winrt::uninit_apartment();
+        return 1;
+    }
+
+    // Initialize the Direct3D 11 capture runtime.
+    windows_snip::CaptureRuntime captureRuntime;
+
+    std::wstring captureError;
+
+    if (!captureRuntime.Initialize(captureError)) {
+
+        logger.Write(
+            windows_snip::LogLevel::Critical,
+            L"Direct3D 11 capture runtime initialization failed."
+        );
+
+        MessageBoxW(
+            nullptr,
+            captureError.c_str(),
+            WINDOW_TITLE,
+            MB_OK | MB_ICONERROR
+        );
+
+        graphics.Shutdown();
+        logger.Shutdown();
+        winrt::uninit_apartment();
+
+        return 1;
+    }
+
+    // Record which Direct3D initialization path succeeded.
+    if (captureRuntime.IsHardwareAccelerated()) {
+
+        logger.Write(
+            windows_snip::LogLevel::Info,
+            L"Direct3D 11 initialized using hardware acceleration."
+        );
+
+    }
+    else {
+
+        logger.Write(
+            windows_snip::LogLevel::Warning,
+            L"Direct3D 11 initialized using the WARP software fallback."
+        );
+    }
+
+    // Identify the GPU backing the Direct3D device.
+    const std::wstring adapterDescription =
+        captureRuntime.GetAdapterDescription();
+
+    if (!adapterDescription.empty()) {
+
+        logger.Write(
+            windows_snip::LogLevel::Info,
+            L"Direct3D adapter: " + adapterDescription
+        );
+
+    }
+    else {
+
+        logger.Write(
+            windows_snip::LogLevel::Warning,
+            L"Could not retrieve the Direct3D adapter description."
+        );
+    }
+    // Check Windows Graphics Capture availability.
+    if (captureRuntime.IsCaptureSupported()) {
+
+        logger.Write(
+            windows_snip::LogLevel::Info,
+            L"Windows Graphics Capture is supported."
+        );
+
+    }
+    else {
+
+        logger.Write(
+            windows_snip::LogLevel::Warning,
+            L"Windows Graphics Capture is not supported."
+        );
+    }
+
+    // 3. Register the main window class.
+    if (!RegisterMainWindowClass(instance)) {
+        MessageBoxW(
+            nullptr,
+            L"Could not register the application window class.",
+            WINDOW_TITLE,
+            MB_OK | MB_ICONERROR
+        );
+        captureRuntime.Shutdown();
+        graphics.Shutdown();
+        logger.Shutdown();
+        winrt::uninit_apartment();
+
+        return 1;
+    }
+    logger.Write(
+        windows_snip::LogLevel::Info,
+        L"Direct2D, DirectWrite and WIC initialized successfully."
     );
-}
 
-// Only retrieve WinRT activation arguments when packaged.
-if (isPackaged) {
+    // 4. Define the desired client area.
+    constexpr int CLIENT_WIDTH = 1100;
+    constexpr int CLIENT_HEIGHT = 720;
 
-    const auto activationArgs =
-        winrt::Windows::ApplicationModel::AppInstance::
-            GetActivatedEventArgs();
+    RECT windowRect{
+        0, 0,
+        CLIENT_WIDTH,
+        CLIENT_HEIGHT
+    };
 
-    if (
-        activationArgs &&
-        activationArgs.Kind() ==
-            winrt::Windows::ApplicationModel::Activation::
-                ActivationKind::Protocol
-    ) {
-        const auto protocolArgs = activationArgs.try_as<
-            winrt::Windows::ApplicationModel::Activation::
-                IProtocolActivatedEventArgs
-        >();
+    const DWORD windowStyle = WS_OVERLAPPEDWINDOW;
 
-        if (protocolArgs) {
-            handleCaptureResponse(protocolArgs.Uri());
-            return 0;
-        }
+    AdjustWindowRectEx(
+        &windowRect,
+        windowStyle,
+        FALSE,
+        0
+    );
 
+    const int windowWidth =
+        windowRect.right - windowRect.left;
+
+    const int windowHeight =
+        windowRect.bottom - windowRect.top;
+
+    // 5. Center the application in the work area.
+    RECT workArea{};
+
+    SystemParametersInfoW(
+        SPI_GETWORKAREA,
+        0,
+        &workArea,
+        0
+    );
+
+    const int x =
+        workArea.left +
+        ((workArea.right - workArea.left) - windowWidth) / 2;
+
+    const int y =
+        workArea.top +
+        ((workArea.bottom - workArea.top) - windowHeight) / 2;
+
+    // 6. Create the application window.
+    HWND hwnd = CreateWindowExW(
+        0,
+        WINDOW_CLASS_NAME,
+        WINDOW_TITLE,
+        windowStyle,
+        x,
+        y,
+        windowWidth,
+        windowHeight,
+        nullptr,
+        nullptr,
+        instance,
+        &renderer
+    );
+
+    if (!hwnd) {
         MessageBoxW(
             nullptr,
-            L"Protocol activation arguments could not be retrieved.",
-            L"Windows Scroll Capture - Error",
+            L"Could not create the main application window.",
+            WINDOW_TITLE,
             MB_OK | MB_ICONERROR
         );
 
+        UnregisterClassW(WINDOW_CLASS_NAME, instance);
+        captureRuntime.Shutdown();
+        graphics.Shutdown();
+        logger.Shutdown();
+        winrt::uninit_apartment();
+
         return 1;
     }
-}
 
+    std::wstring rendererError;
 
-    RECT selectedRegion{};
-
-    if (selectCaptureRegion(selectedRegion)) {
-
-
-
-        runScrollController(selectedRegion);
-    }
-
-    return 0;
-    }
-    catch (const winrt::hresult_error& error) {
-        std::wstring message =
-            L"Windows Runtime error:\n\n";
-
-        message += error.message().c_str();
-
+    if (!renderer.Initialize(
+        hwnd,
+        graphics,
+        rendererError
+    )) {
         MessageBoxW(
             nullptr,
-            message.c_str(),
-            L"Windows Scroll Capture - Error",
+            rendererError.c_str(),
+            WINDOW_TITLE,
             MB_OK | MB_ICONERROR
         );
 
-        return 1;
-    }
-    catch (...) {
-        MessageBoxW(
-            nullptr,
-            L"An unexpected error occurred.",
-            L"Windows Scroll Capture",
-            MB_OK | MB_ICONERROR
-        );
+        DestroyWindow(hwnd);
+        UnregisterClassW(WINDOW_CLASS_NAME, instance);
+
+        renderer.Shutdown();
+        captureRuntime.Shutdown();
+        graphics.Shutdown();
+        logger.Shutdown();
+        winrt::uninit_apartment();
 
         return 1;
     }
+    logger.Write(
+        windows_snip::LogLevel::Info,
+        L"Direct2D window renderer initialized successfully."
+    );
+
+    // 7. Display the application.
+    ShowWindow(hwnd, showCommand);
+    UpdateWindow(hwnd);
+
+    // 8. Run the Windows message loop.
+    MSG message{};
+
+    int messageResult = 0;
+
+    while ((messageResult = GetMessageW(
+        &message,
+        nullptr,
+        0,
+        0
+    )) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+
+    // 9. Release application resources.
+    UnregisterClassW(WINDOW_CLASS_NAME, instance);
+    logger.Write(
+        windows_snip::LogLevel::Info,
+        L"Windows Snip Tool application shutting down."
+    );
+
+    renderer.Shutdown();
+    captureRuntime.Shutdown();
+    graphics.Shutdown();
+    logger.Shutdown();
+    winrt::uninit_apartment();
+
+    return messageResult == -1 ? 1 : 0;
 }
