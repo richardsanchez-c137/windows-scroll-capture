@@ -8,6 +8,7 @@
 #include "capture/capture_runtime.hpp"
 #include "ui/selection_overlay.hpp"
 #include "capture/monitor_capture.hpp"
+#include "image/image_exporter.hpp"
 
 
 namespace {
@@ -29,6 +30,7 @@ struct MainWindowContext {
     windows_snip::GraphicsRuntime* graphics = nullptr;
     windows_snip::MonitorCapture* monitorCapture = nullptr;
     windows_snip::MonitorCaptureResult* latestCapture = nullptr;
+    windows_snip::ImageExporter* imageExporter;
 };
 
 LRESULT CALLBACK MainWindowProc(
@@ -86,19 +88,25 @@ LRESULT CALLBACK MainWindowProc(
         return 0;
 
     case WM_LBUTTONUP:
-        if (context && context->renderer &&
+    {
+        if (!context || !context->renderer) {
+            return 0;
+        }
+
+        const auto action =
             context->renderer->HandleMouseButtonUp(
                 static_cast<float>(LOWORD(lParam)),
                 static_cast<float>(HIWORD(lParam))
-            )) {
+            );
+
+        // Start a new capture.
+        if (action ==
+            windows_snip::WindowRenderer::ToolbarAction::StartCapture) {
 
             if (context->selectionOverlay) {
                 std::wstring error;
 
-                if (!context->selectionOverlay->Start(
-                    hwnd,
-                    error
-                )) {
+                if (!context->selectionOverlay->Start(hwnd, error)) {
                     MessageBoxW(
                         hwnd,
                         error.c_str(),
@@ -109,7 +117,98 @@ LRESULT CALLBACK MainWindowProc(
             }
         }
 
+        // Save screenshot.
+        else if (action ==
+            windows_snip::WindowRenderer::ToolbarAction::SaveImage) {
+
+            if (!context->imageExporter ||
+                !context->latestCapture ||
+                !context->latestCapture->bitmap ||
+                !context->graphics) {
+
+                MessageBoxW(
+                    hwnd,
+                    L"Capture a screenshot first.",
+                    L"No Screenshot Available",
+                    MB_OK | MB_ICONINFORMATION
+                );
+
+                return 0;
+            }
+
+            std::wstring error;
+
+            const auto result =
+                context->imageExporter->SavePng(
+                    hwnd,
+                    context->latestCapture->bitmap.Get(),
+                    context->graphics->GetWICFactory(),
+                    error
+                );
+
+            if (result ==
+                windows_snip::ImageSaveResult::Failed) {
+
+                MessageBoxW(
+                    hwnd,
+                    error.c_str(),
+                    L"Save Failed",
+                    MB_OK | MB_ICONERROR
+                );
+            }
+            else if (result ==
+                windows_snip::ImageSaveResult::Success) {
+
+                MessageBoxW(
+                    hwnd,
+                    L"Screenshot saved successfully.",
+                    L"Save Complete",
+                    MB_OK | MB_ICONINFORMATION
+                );
+            }
+        }
+
+        // Copy screenshot.
+        else if (action ==
+            windows_snip::WindowRenderer::ToolbarAction::CopyImage) {
+
+            if (!context->imageExporter ||
+                !context->latestCapture ||
+                !context->latestCapture->bitmap ||
+                !context->graphics) {
+
+                MessageBoxW(
+                    hwnd,
+                    L"Capture a screenshot first.",
+                    L"No Screenshot Available",
+                    MB_OK | MB_ICONINFORMATION
+                );
+
+                return 0;
+            }
+
+            std::wstring error;
+
+            const bool copied =
+                context->imageExporter->CopyToClipboard(
+                    hwnd,
+                    context->latestCapture->bitmap.Get(),
+                    context->graphics->GetWICFactory(),
+                    error
+                );
+
+            if (!copied) {
+                MessageBoxW(
+                    hwnd,
+                    error.c_str(),
+                    L"Copy Failed",
+                    MB_OK | MB_ICONERROR
+                );
+            }
+        }
+
         return 0;
+    }
 
     case windows_snip::WM_APP_SELECTION_COMPLETED:
 
@@ -180,6 +279,90 @@ LRESULT CALLBACK MainWindowProc(
         );
         return 0;
 
+    case WM_KEYDOWN:
+    {
+        const bool ctrlPressed =
+            (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+
+        if (ctrlPressed && (wParam == 'S' || wParam == 'C'))
+        {
+            if (!context ||
+                !context->imageExporter ||
+                !context->latestCapture ||
+                !context->graphics ||
+                !context->latestCapture->bitmap.Get())
+            {
+                MessageBoxW(
+                    hwnd,
+                    L"Capture a screenshot first.",
+                    L"No Screenshot Available",
+                    MB_OK | MB_ICONINFORMATION
+                );
+                return 0;
+            }
+
+            std::wstring error;
+
+            if (wParam == 'S')
+            {
+                const auto result =
+                    context->imageExporter->SavePng(
+                        hwnd,
+                        context->latestCapture->bitmap.Get(),
+                        context->graphics->GetWICFactory(),
+                        error
+                    );
+
+                if (result == windows_snip::ImageSaveResult::Failed)
+                {
+                    MessageBoxW(
+                        hwnd,
+                        error.c_str(),
+                        L"Save Failed",
+                        MB_OK | MB_ICONERROR
+                    );
+                }
+                else if (result == windows_snip::ImageSaveResult::Success)
+                {
+                    MessageBoxW(
+                        hwnd,
+                        L"Screenshot saved successfully.",
+                        L"Save Complete",
+                        MB_OK | MB_ICONINFORMATION
+                    );
+                }
+
+                // Cancelled: do not show an error.
+                return 0;
+            }
+
+            if (wParam == 'C')
+            {
+                const bool copied =
+                    context->imageExporter->CopyToClipboard(
+                        hwnd,
+                        context->latestCapture->bitmap.Get(),
+                        context->graphics->GetWICFactory(),
+                        error
+                    );
+
+                if (!copied)
+                {
+                    MessageBoxW(
+                        hwnd,
+                        error.c_str(),
+                        L"Copy Failed",
+                        MB_OK | MB_ICONERROR
+                    );
+                }
+
+                // On success, don't show a MessageBox.
+                // It can overwrite the image clipboard when Ctrl+C is pressed.
+                return 0;
+            }
+        }
+        break;
+    }
     case WM_CLOSE:
         DestroyWindow(hwnd);
         return 0;
@@ -305,6 +488,7 @@ int WINAPI wWinMain(
     windows_snip::WindowRenderer renderer;
     windows_snip::GraphicsRuntime graphics;
     windows_snip::SelectionOverlay selectionOverlay;
+    windows_snip::ImageExporter imageExporter;
 
     std::wstring graphicsError;
 
@@ -472,7 +656,8 @@ int WINAPI wWinMain(
             &captureRuntime,
             &graphics,
             &monitorCapture,
-            &latestCapture
+            &latestCapture,
+            &imageExporter
         };
     HWND hwnd = CreateWindowExW(
         0,

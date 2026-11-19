@@ -14,6 +14,12 @@ namespace windows_snip {
 
 class WindowRenderer {
 public:
+    enum class ToolbarAction {
+        None,
+        StartCapture,
+        SaveImage,
+        CopyImage
+    };
     WindowRenderer() = default;
     ~WindowRenderer() = default;
 
@@ -28,7 +34,7 @@ public:
 
     void Render();
     void Resize(UINT width, UINT height);
-    bool HandleMouseButtonUp(float x, float y);
+    ToolbarAction HandleMouseButtonUp(float x, float y);
     void Shutdown() noexcept;
     bool SetCapturedImage(
         IWICBitmap* bitmap,

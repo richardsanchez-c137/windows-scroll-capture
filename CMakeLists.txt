@@ -36,6 +36,7 @@ add_executable(WindowsSnipTool WIN32
     src/logger.cpp
     src/ui/selection_overlay.cpp
     src/capture/monitor_capture.cpp
+    src/image/image_exporter.cpp
 )
 target_include_directories(WindowsSnipTool PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -58,6 +59,7 @@ target_link_libraries(WindowsSnipTool PRIVATE
     user32
     gdi32
     ole32
+    shell32
     d2d1
     dwrite
     windowscodecs

@@ -633,6 +633,54 @@ void WindowRenderer::Render() {
     );
 
     drawChevron(594.0f, 105.0f);
+        // Save and Copy toolbar actions.
+    drawSeparator(620.0f, 86.0f, 124.0f);
+
+    const bool hasCapturedImage = capturedImageSource_ != nullptr;
+
+    auto drawActionButton = [&](const D2D1_RECT_F& rect,
+                                const wchar_t* label) {
+
+        const auto roundedRect =
+            D2D1::RoundedRect(rect, 6.0f, 6.0f);
+
+        if (hasCapturedImage) {
+            renderTarget_->FillRoundedRectangle(
+                roundedRect,
+                buttonBrush_.Get()
+            );
+        }
+
+        renderTarget_->DrawRoundedRectangle(
+            roundedRect,
+            hasCapturedImage
+                ? borderBrush_.Get()
+                : separatorBrush_.Get(),
+            1.0f
+        );
+
+        drawText(
+            label,
+            buttonTextFormat_.Get(),
+            rect.left + 10.0f,
+            rect.top + 3.0f,
+            rect.right - 5.0f,
+            rect.bottom - 3.0f,
+            hasCapturedImage
+                ? textBrush_.Get()
+                : mutedTextBrush_.Get()
+        );
+    };
+
+    drawActionButton(
+        D2D1::RectF(628.0f, 84.0f, 688.0f, 126.0f),
+        L"Save"
+    );
+
+    drawActionButton(
+        D2D1::RectF(694.0f, 84.0f, 754.0f, 126.0f),
+        L"Copy"
+    );
 
     // More options menu.
     const float moreX = size.width - 48.0f;
@@ -1072,9 +1120,11 @@ void WindowRenderer::Resize(
     }
 }
 
-bool WindowRenderer::HandleMouseButtonUp(float x, float y) {
+WindowRenderer::ToolbarAction
+WindowRenderer::HandleMouseButtonUp(float x, float y) {
+
     if (!renderTarget_ || !window_) {
-        return false;
+        return ToolbarAction::None;
     }
 
     // Convert Windows client pixels into Direct2D DIPs.
@@ -1093,12 +1143,13 @@ bool WindowRenderer::HandleMouseButtonUp(float x, float y) {
 
     bool changed = false;
     bool menuItemHandled = false;
-    bool startCapture = false;
+
+    ToolbarAction action = ToolbarAction::None;
 
     // Capture-mode menu selection.
     if (captureModeMenuOpen_) {
 
-       if (x >= 296.0f && x <= 474.0f &&
+        if (x >= 296.0f && x <= 474.0f &&
             y >= 140.0f && y < 340.0f) {
 
             const int index =
@@ -1135,8 +1186,7 @@ bool WindowRenderer::HandleMouseButtonUp(float x, float y) {
         changed = true;
     }
 
-    // Process toolbar actions if the click did not select
-    // an item from an already-open dropdown.
+    // Process toolbar actions if no dropdown item was selected.
     if (!menuItemHandled) {
 
         // New capture button.
@@ -1145,13 +1195,14 @@ bool WindowRenderer::HandleMouseButtonUp(float x, float y) {
 
             captureModeMenuOpen_ = false;
             delayMenuOpen_ = false;
-            startCapture = true;
+
+            action = ToolbarAction::StartCapture;
             changed = true;
         }
 
         // Screenshot mode.
         else if (y >= 82.0f && y <= 128.0f &&
-            x >= 169.0f && x <= 217.0f) {
+                 x >= 169.0f && x <= 217.0f) {
 
             videoModeSelected_ = false;
             captureModeMenuOpen_ = false;
@@ -1186,12 +1237,31 @@ bool WindowRenderer::HandleMouseButtonUp(float x, float y) {
             captureModeMenuOpen_ = false;
             changed = true;
         }
+
+        // Save screenshot.
+        else if (y >= 82.0f && y <= 128.0f &&
+                 x >= 628.0f && x <= 688.0f) {
+
+            if (capturedImageSource_) {
+                action = ToolbarAction::SaveImage;
+            }
+        }
+
+        // Copy screenshot.
+        else if (y >= 82.0f && y <= 128.0f &&
+                 x >= 694.0f && x <= 754.0f) {
+
+            if (capturedImageSource_) {
+                action = ToolbarAction::CopyImage;
+            }
+        }
     }
 
     if (changed) {
         InvalidateRect(window_, nullptr, FALSE);
     }
-    return startCapture;
+
+    return action;
 }
 
 void WindowRenderer::Shutdown() noexcept {
