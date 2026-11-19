@@ -34,6 +34,8 @@ add_executable(WindowsSnipTool WIN32
     src/window_renderer.cpp
     src/capture_runtime.cpp
     src/logger.cpp
+    src/ui/selection_overlay.cpp
+    src/capture/monitor_capture.cpp
 )
 target_include_directories(WindowsSnipTool PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"

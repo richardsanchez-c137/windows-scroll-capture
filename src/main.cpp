@@ -6,6 +6,8 @@
 #include "graphics/window_renderer.hpp"
 #include "core/logger.hpp"
 #include "capture/capture_runtime.hpp"
+#include "ui/selection_overlay.hpp"
+#include "capture/monitor_capture.hpp"
 
 
 namespace {
@@ -19,12 +21,27 @@ constexpr wchar_t WINDOW_TITLE[] =
 constexpr COLORREF BACKGROUND_COLOR =
     RGB(24, 27, 33);
 
+struct MainWindowContext {
+    windows_snip::WindowRenderer* renderer = nullptr;
+    windows_snip::SelectionOverlay* selectionOverlay = nullptr;
+    windows_snip::Logger* logger = nullptr;
+    windows_snip::CaptureRuntime* captureRuntime = nullptr;
+    windows_snip::GraphicsRuntime* graphics = nullptr;
+    windows_snip::MonitorCapture* monitorCapture = nullptr;
+    windows_snip::MonitorCaptureResult* latestCapture = nullptr;
+};
+
 LRESULT CALLBACK MainWindowProc(
     HWND hwnd,
     UINT message,
     WPARAM wParam,
     LPARAM lParam
 ) {
+    auto* context =
+        reinterpret_cast<MainWindowContext*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA)
+        );
+
     switch (message) {
 
     case WM_ERASEBKGND:
@@ -49,27 +66,17 @@ LRESULT CALLBACK MainWindowProc(
         PAINTSTRUCT ps{};
         BeginPaint(hwnd, &ps);
 
-        auto* renderer =
-            reinterpret_cast<windows_snip::WindowRenderer*>(
-                GetWindowLongPtrW(hwnd, GWLP_USERDATA)
-            );
-
-        if (renderer) {
-            renderer->Render();
+        if (context && context->renderer) {
+            context->renderer->Render();
         }
 
         EndPaint(hwnd, &ps);
         return 0;
     }
 
-    case WM_SIZE: {
-        auto* renderer =
-            reinterpret_cast<windows_snip::WindowRenderer*>(
-                GetWindowLongPtrW(hwnd, GWLP_USERDATA)
-            );
-
-        if (renderer) {
-            renderer->Resize(
+    case WM_SIZE:
+        if (context && context->renderer) {
+            context->renderer->Resize(
                 static_cast<UINT>(LOWORD(lParam)),
                 static_cast<UINT>(HIWORD(lParam))
             );
@@ -77,23 +84,101 @@ LRESULT CALLBACK MainWindowProc(
 
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
-    }
 
-    case WM_LBUTTONUP: {
-        auto* renderer =
-            reinterpret_cast<windows_snip::WindowRenderer*>(
-                GetWindowLongPtrW(hwnd, GWLP_USERDATA)
-            );
-
-        if (renderer) {
-            renderer->HandleMouseButtonUp(
+    case WM_LBUTTONUP:
+        if (context && context->renderer &&
+            context->renderer->HandleMouseButtonUp(
                 static_cast<float>(LOWORD(lParam)),
                 static_cast<float>(HIWORD(lParam))
-            );
+            )) {
+
+            if (context->selectionOverlay) {
+                std::wstring error;
+
+                if (!context->selectionOverlay->Start(
+                    hwnd,
+                    error
+                )) {
+                    MessageBoxW(
+                        hwnd,
+                        error.c_str(),
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+                }
+            }
         }
 
         return 0;
-    }
+
+    case windows_snip::WM_APP_SELECTION_COMPLETED:
+
+        if (context &&
+            context->selectionOverlay &&
+            context->captureRuntime &&
+            context->graphics &&
+            context->monitorCapture &&
+            context->latestCapture) {
+
+            const RECT selection =
+                context->selectionOverlay->GetSelectionScreenRect();
+
+            std::wstring captureError;
+
+            const bool success =
+                context->monitorCapture->CaptureMonitorRegion(
+                    *context->captureRuntime,
+                    *context->graphics,
+                    selection,
+                    *context->latestCapture,
+                    captureError
+                );
+
+            if (!success) {
+                MessageBoxW(
+                    hwnd,
+                    captureError.c_str(),
+                    WINDOW_TITLE,
+                    MB_OK | MB_ICONERROR
+                );
+
+                return 0;
+            }
+
+            if (!context->latestCapture->bitmap) {
+                MessageBoxW(
+                    hwnd,
+                    L"Capture completed without producing an image.",
+                    WINDOW_TITLE,
+                    MB_OK | MB_ICONERROR
+                );
+
+                return 0;
+            }
+
+            std::wstring previewError;
+
+            if (!context->renderer->SetCapturedImage(
+                context->latestCapture->bitmap.Get(),
+                context->graphics->GetWICFactory(),
+                previewError
+            )) {
+                MessageBoxW(
+                    hwnd,
+                    previewError.c_str(),
+                    WINDOW_TITLE,
+                    MB_OK | MB_ICONERROR
+                );
+            }
+        }
+
+        return 0;
+
+    case windows_snip::WM_APP_SELECTION_CANCELLED:
+        OutputDebugStringW(
+            L"Screen selection cancelled.\n"
+        );
+        return 0;
 
     case WM_CLOSE:
         DestroyWindow(hwnd);
@@ -219,6 +304,7 @@ int WINAPI wWinMain(
     // Initialize the shared graphics runtime.
     windows_snip::WindowRenderer renderer;
     windows_snip::GraphicsRuntime graphics;
+    windows_snip::SelectionOverlay selectionOverlay;
 
     std::wstring graphicsError;
 
@@ -236,6 +322,8 @@ int WINAPI wWinMain(
 
     // Initialize the Direct3D 11 capture runtime.
     windows_snip::CaptureRuntime captureRuntime;
+    windows_snip::MonitorCapture monitorCapture;
+    windows_snip::MonitorCaptureResult latestCapture;
 
     std::wstring captureError;
 
@@ -377,6 +465,15 @@ int WINAPI wWinMain(
         ((workArea.bottom - workArea.top) - windowHeight) / 2;
 
     // 6. Create the application window.
+        MainWindowContext windowContext{
+            &renderer,
+            &selectionOverlay,
+            &logger,
+            &captureRuntime,
+            &graphics,
+            &monitorCapture,
+            &latestCapture
+        };
     HWND hwnd = CreateWindowExW(
         0,
         WINDOW_CLASS_NAME,
@@ -389,7 +486,7 @@ int WINAPI wWinMain(
         nullptr,
         nullptr,
         instance,
-        &renderer
+        &windowContext
     );
 
     if (!hwnd) {
@@ -404,6 +501,7 @@ int WINAPI wWinMain(
         captureRuntime.Shutdown();
         graphics.Shutdown();
         logger.Shutdown();
+        latestCapture.Reset();
         winrt::uninit_apartment();
 
         return 1;
@@ -426,6 +524,7 @@ int WINAPI wWinMain(
         DestroyWindow(hwnd);
         UnregisterClassW(WINDOW_CLASS_NAME, instance);
 
+        selectionOverlay.Shutdown();
         renderer.Shutdown();
         captureRuntime.Shutdown();
         graphics.Shutdown();
@@ -464,7 +563,7 @@ int WINAPI wWinMain(
         windows_snip::LogLevel::Info,
         L"Windows Snip Tool application shutting down."
     );
-
+    selectionOverlay.Shutdown();
     renderer.Shutdown();
     captureRuntime.Shutdown();
     graphics.Shutdown();

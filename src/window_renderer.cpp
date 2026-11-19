@@ -4,6 +4,7 @@
 #include <cwchar>
 #include <sstream>
 #include <iterator>
+#include <wincodec.h>
 
 namespace windows_snip {
 
@@ -267,6 +268,27 @@ void WindowRenderer::Render() {
             return;
         }
     }
+    // Convert the captured WIC image into a Direct2D bitmap.
+    if (capturedImageSource_ && !capturedD2DBitmap_) {
+
+        const HRESULT imageResult =
+            renderTarget_->CreateBitmapFromWicBitmap(
+                capturedImageSource_.Get(),
+                nullptr,
+                capturedD2DBitmap_.GetAddressOf()
+            );
+
+        if (FAILED(imageResult)) {
+            const auto imageError =
+                makeRenderError(
+                    L"Captured image bitmap creation",
+                    imageResult
+                );
+
+            OutputDebugStringW(imageError.c_str());
+            OutputDebugStringW(L"\n");
+        }
+    }
 
     const D2D1_SIZE_F size = renderTarget_->GetSize();
 
@@ -495,21 +517,25 @@ void WindowRenderer::Render() {
     const wchar_t* captureModeLabel = L"Rectangle";
 
     switch (captureMode_) {
-    case CaptureMode::Rectangle:
-        captureModeLabel = L"Rectangle";
-        break;
+        case CaptureMode::Rectangle:
+            captureModeLabel = L"Rectangle";
+            break;
 
-    case CaptureMode::Window:
-        captureModeLabel = L"Window";
-        break;
+        case CaptureMode::Window:
+            captureModeLabel = L"Window";
+            break;
 
-    case CaptureMode::FullScreen:
-        captureModeLabel = L"Full screen";
-        break;
+        case CaptureMode::FullScreen:
+            captureModeLabel = L"Full screen";
+            break;
 
-    case CaptureMode::Freeform:
-        captureModeLabel = L"Freeform";
-        break;
+        case CaptureMode::Freeform:
+            captureModeLabel = L"Freeform";
+            break;
+
+        case CaptureMode::Scroll:
+            captureModeLabel = L"Scroll";
+            break;
     }
 
     const wchar_t* delayLabel = L"No delay";
@@ -635,126 +661,178 @@ void WindowRenderer::Render() {
 
     // ---------------------------------------------------------
     // 3. Empty state / main content
-    // ---------------------------------------------------------
+    if (!capturedD2DBitmap_) {
+        // ---------------------------------------------------------
+        const float centerX = size.width * 0.5f;
+        const float centerY = 285.0f;
 
-    const float centerX = size.width * 0.5f;
-    const float centerY = 285.0f;
-
-    // Main capture illustration: screen outline.
-    renderTarget_->DrawRoundedRectangle(
-        D2D1::RoundedRect(
-            D2D1::RectF(
-                centerX - 48.0f,
-                centerY - 35.0f,
-                centerX + 48.0f,
-                centerY + 27.0f
+        // Main capture illustration: screen outline.
+        renderTarget_->DrawRoundedRectangle(
+            D2D1::RoundedRect(
+                D2D1::RectF(
+                    centerX - 48.0f,
+                    centerY - 35.0f,
+                    centerX + 48.0f,
+                    centerY + 27.0f
+                ),
+                7.0f,
+                7.0f
             ),
-            7.0f,
-            7.0f
-        ),
-        borderBrush_.Get(),
-        2.0f
-    );
+            borderBrush_.Get(),
+            2.0f
+        );
 
-    // Capture corners.
-    const float left = centerX - 34.0f;
-    const float right = centerX + 34.0f;
-    const float top = centerY - 21.0f;
-    const float bottom = centerY + 13.0f;
-    const float cornerLength = 11.0f;
+        // Capture corners.
+        const float left = centerX - 34.0f;
+        const float right = centerX + 34.0f;
+        const float top = centerY - 21.0f;
+        const float bottom = centerY + 13.0f;
+        const float cornerLength = 11.0f;
 
-    // Top-left.
-    renderTarget_->DrawLine(
-        D2D1::Point2F(left, top + cornerLength),
-        D2D1::Point2F(left, top),
-        accentBrush_.Get(),
-        2.5f
-    );
-    renderTarget_->DrawLine(
-        D2D1::Point2F(left, top),
-        D2D1::Point2F(left + cornerLength, top),
-        accentBrush_.Get(),
-        2.5f
-    );
+        // Top-left.
+        renderTarget_->DrawLine(
+            D2D1::Point2F(left, top + cornerLength),
+            D2D1::Point2F(left, top),
+            accentBrush_.Get(),
+            2.5f
+        );
+        renderTarget_->DrawLine(
+            D2D1::Point2F(left, top),
+            D2D1::Point2F(left + cornerLength, top),
+            accentBrush_.Get(),
+            2.5f
+        );
 
-    // Top-right.
-    renderTarget_->DrawLine(
-        D2D1::Point2F(right - cornerLength, top),
-        D2D1::Point2F(right, top),
-        accentBrush_.Get(),
-        2.5f
-    );
-    renderTarget_->DrawLine(
-        D2D1::Point2F(right, top),
-        D2D1::Point2F(right, top + cornerLength),
-        accentBrush_.Get(),
-        2.5f
-    );
+        // Top-right.
+        renderTarget_->DrawLine(
+            D2D1::Point2F(right - cornerLength, top),
+            D2D1::Point2F(right, top),
+            accentBrush_.Get(),
+            2.5f
+        );
+        renderTarget_->DrawLine(
+            D2D1::Point2F(right, top),
+            D2D1::Point2F(right, top + cornerLength),
+            accentBrush_.Get(),
+            2.5f
+        );
 
-    // Bottom-left.
-    renderTarget_->DrawLine(
-        D2D1::Point2F(left, bottom - cornerLength),
-        D2D1::Point2F(left, bottom),
-        accentBrush_.Get(),
-        2.5f
-    );
-    renderTarget_->DrawLine(
-        D2D1::Point2F(left, bottom),
-        D2D1::Point2F(left + cornerLength, bottom),
-        accentBrush_.Get(),
-        2.5f
-    );
+        // Bottom-left.
+        renderTarget_->DrawLine(
+            D2D1::Point2F(left, bottom - cornerLength),
+            D2D1::Point2F(left, bottom),
+            accentBrush_.Get(),
+            2.5f
+        );
+        renderTarget_->DrawLine(
+            D2D1::Point2F(left, bottom),
+            D2D1::Point2F(left + cornerLength, bottom),
+            accentBrush_.Get(),
+            2.5f
+        );
 
-    // Bottom-right.
-    renderTarget_->DrawLine(
-        D2D1::Point2F(right - cornerLength, bottom),
-        D2D1::Point2F(right, bottom),
-        accentBrush_.Get(),
-        2.5f
-    );
-    renderTarget_->DrawLine(
-        D2D1::Point2F(right, bottom),
-        D2D1::Point2F(right, bottom - cornerLength),
-        accentBrush_.Get(),
-        2.5f
-    );
+        // Bottom-right.
+        renderTarget_->DrawLine(
+            D2D1::Point2F(right - cornerLength, bottom),
+            D2D1::Point2F(right, bottom),
+            accentBrush_.Get(),
+            2.5f
+        );
+        renderTarget_->DrawLine(
+            D2D1::Point2F(right, bottom),
+            D2D1::Point2F(right, bottom - cornerLength),
+            accentBrush_.Get(),
+            2.5f
+        );
 
-    // Screen stand.
-    renderTarget_->DrawLine(
-        D2D1::Point2F(centerX, centerY + 27.0f),
-        D2D1::Point2F(centerX, centerY + 39.0f),
-        borderBrush_.Get(),
-        2.0f
-    );
+        // Screen stand.
+        renderTarget_->DrawLine(
+            D2D1::Point2F(centerX, centerY + 27.0f),
+            D2D1::Point2F(centerX, centerY + 39.0f),
+            borderBrush_.Get(),
+            2.0f
+        );
 
-    renderTarget_->DrawLine(
-        D2D1::Point2F(centerX - 17.0f, centerY + 40.0f),
-        D2D1::Point2F(centerX + 17.0f, centerY + 40.0f),
-        borderBrush_.Get(),
-        2.0f
-    );
+        renderTarget_->DrawLine(
+            D2D1::Point2F(centerX - 17.0f, centerY + 40.0f),
+            D2D1::Point2F(centerX + 17.0f, centerY + 40.0f),
+            borderBrush_.Get(),
+            2.0f
+        );
 
-    // Main instruction.
-    drawText(
-        L"Press Windows logo key + Shift + S",
-        messageTextFormat_.Get(),
-        80.0f,
-        centerY + 85.0f,
-        size.width - 80.0f,
-        centerY + 125.0f,
-        textBrush_.Get()
-    );
+        // Main instruction.
+        drawText(
+            L"Press Windows logo key + Shift + S",
+            messageTextFormat_.Get(),
+            80.0f,
+            centerY + 85.0f,
+            size.width - 80.0f,
+            centerY + 125.0f,
+            textBrush_.Get()
+        );
 
-    // Supporting instruction.
-    drawText(
-        L"to start a snip, or select New to capture your screen.",
-        captionTextFormat_.Get(),
-        80.0f,
-        centerY + 130.0f,
-        size.width - 80.0f,
-        centerY + 165.0f,
-        mutedTextBrush_.Get()
-    );
+        // Supporting instruction.
+        drawText(
+            L"to start a snip, or select New to capture your screen.",
+            captionTextFormat_.Get(),
+            80.0f,
+            centerY + 130.0f,
+            size.width - 80.0f,
+            centerY + 165.0f,
+            mutedTextBrush_.Get()
+        );
+    }
+    else {
+        const D2D1_SIZE_F imageSize =
+            capturedD2DBitmap_->GetSize();
+
+        constexpr float CONTENT_TOP = 165.0f;
+        constexpr float CONTENT_MARGIN = 32.0f;
+
+        const float availableWidth =
+            (std::max)(1.0f, size.width - CONTENT_MARGIN * 2.0f);
+
+        const float availableHeight =
+            (std::max)(
+                1.0f,
+                size.height - CONTENT_TOP - CONTENT_MARGIN
+            );
+
+        const float scale = (std::min)(
+            availableWidth / imageSize.width,
+            availableHeight / imageSize.height
+        );
+
+        const float imageWidth = imageSize.width * scale;
+        const float imageHeight = imageSize.height * scale;
+
+        const float imageLeft =
+            (size.width - imageWidth) * 0.5f;
+
+        const float imageTop =
+            CONTENT_TOP + (availableHeight - imageHeight) * 0.5f;
+
+        const D2D1_RECT_F destination = D2D1::RectF(
+            imageLeft,
+            imageTop,
+            imageLeft + imageWidth,
+            imageTop + imageHeight
+        );
+
+        renderTarget_->DrawBitmap(
+            capturedD2DBitmap_.Get(),
+            destination,
+            1.0f,
+            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
+        );
+
+        renderTarget_->DrawRectangle(
+            destination,
+            borderBrush_.Get(),
+            1.0f
+        );
+    }
+
     // ---------------------------------------------------------
     // 4. Capture mode dropdown
     // ---------------------------------------------------------
@@ -773,7 +851,7 @@ void WindowRenderer::Render() {
                     MENU_LEFT,
                     MENU_TOP,
                     MENU_RIGHT,
-                    MENU_TOP + 168.0f
+                    MENU_TOP + 208.0f
                 ),
                 7.0f,
                 7.0f
@@ -785,10 +863,11 @@ void WindowRenderer::Render() {
             L"Rectangle",
             L"Window",
             L"Full screen",
-            L"Freeform"
+            L"Freeform",
+            L"Scroll"
         };
 
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
 
             const float rowTop =
                 MENU_TOP + 4.0f + (i * ROW_HEIGHT);
@@ -841,7 +920,7 @@ void WindowRenderer::Render() {
                     MENU_LEFT,
                     MENU_TOP,
                     MENU_RIGHT,
-                    MENU_TOP + 168.0f
+                    MENU_TOP + 208.0f
                 ),
                 7.0f,
                 7.0f
@@ -956,6 +1035,7 @@ void WindowRenderer::Render() {
         buttonBrush_.Reset();
         borderBrush_.Reset();
         separatorBrush_.Reset();
+        capturedD2DBitmap_.Reset();
         renderTarget_.Reset();
     }
     else if (FAILED(result)) {
@@ -982,6 +1062,7 @@ void WindowRenderer::Resize(
         buttonBrush_.Reset();
         borderBrush_.Reset();
         separatorBrush_.Reset();
+        capturedD2DBitmap_.Reset();
         renderTarget_.Reset();
     }
     else if (FAILED(result)) {
@@ -991,9 +1072,9 @@ void WindowRenderer::Resize(
     }
 }
 
-void WindowRenderer::HandleMouseButtonUp(float x, float y) {
+bool WindowRenderer::HandleMouseButtonUp(float x, float y) {
     if (!renderTarget_ || !window_) {
-        return;
+        return false;
     }
 
     // Convert Windows client pixels into Direct2D DIPs.
@@ -1012,12 +1093,13 @@ void WindowRenderer::HandleMouseButtonUp(float x, float y) {
 
     bool changed = false;
     bool menuItemHandled = false;
+    bool startCapture = false;
 
     // Capture-mode menu selection.
     if (captureModeMenuOpen_) {
 
-        if (x >= 296.0f && x <= 474.0f &&
-            y >= 140.0f && y < 300.0f) {
+       if (x >= 296.0f && x <= 474.0f &&
+            y >= 140.0f && y < 340.0f) {
 
             const int index =
                 static_cast<int>((y - 140.0f) / 40.0f);
@@ -1057,8 +1139,18 @@ void WindowRenderer::HandleMouseButtonUp(float x, float y) {
     // an item from an already-open dropdown.
     if (!menuItemHandled) {
 
-        // Screenshot mode.
+        // New capture button.
         if (y >= 82.0f && y <= 128.0f &&
+            x >= 28.0f && x <= 132.0f) {
+
+            captureModeMenuOpen_ = false;
+            delayMenuOpen_ = false;
+            startCapture = true;
+            changed = true;
+        }
+
+        // Screenshot mode.
+        else if (y >= 82.0f && y <= 128.0f &&
             x >= 169.0f && x <= 217.0f) {
 
             videoModeSelected_ = false;
@@ -1099,6 +1191,7 @@ void WindowRenderer::HandleMouseButtonUp(float x, float y) {
     if (changed) {
         InvalidateRect(window_, nullptr, FALSE);
     }
+    return startCapture;
 }
 
 void WindowRenderer::Shutdown() noexcept {
@@ -1108,6 +1201,9 @@ void WindowRenderer::Shutdown() noexcept {
     buttonBrush_.Reset();
     borderBrush_.Reset();
     separatorBrush_.Reset();
+
+    capturedD2DBitmap_.Reset();
+    capturedImageSource_.Reset();
 
     renderTarget_.Reset();
 
@@ -1135,6 +1231,87 @@ bool WindowRenderer::IsInitialized() const noexcept {
         buttonTextFormat_ != nullptr &&
         messageTextFormat_ != nullptr &&
         captionTextFormat_ != nullptr;
+}
+
+
+bool WindowRenderer::SetCapturedImage(
+    IWICBitmap* bitmap,
+    IWICImagingFactory* wicFactory,
+    std::wstring& error
+) {
+    error.clear();
+
+    if (!bitmap) {
+        error = L"Captured WIC bitmap is null.";
+        return false;
+    }
+
+    if (!wicFactory) {
+        error = L"WIC imaging factory is null.";
+        return false;
+    }
+
+    if (!renderTarget_) {
+        error = L"Direct2D render target is not initialized.";
+        return false;
+    }
+
+    capturedD2DBitmap_.Reset();
+    capturedImageSource_ = bitmap;
+
+    // Convert straight-alpha BGRA into premultiplied-alpha BGRA.
+    Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+
+    HRESULT result = wicFactory->CreateFormatConverter(
+        converter.GetAddressOf()
+    );
+
+    if (FAILED(result)) {
+        error = makeRenderError(
+            L"WIC format converter creation",
+            result
+        );
+        return false;
+    }
+
+    result = converter->Initialize(
+        capturedImageSource_.Get(),
+        GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapDitherTypeNone,
+        nullptr,
+        0.0f,
+        WICBitmapPaletteTypeCustom
+    );
+
+    if (FAILED(result)) {
+        error = makeRenderError(
+            L"WIC BGRA to PBGRA conversion",
+            result
+        );
+        return false;
+    }
+
+    // Direct2D receives the compatible premultiplied-alpha image.
+    result = renderTarget_->CreateBitmapFromWicBitmap(
+        converter.Get(),
+        nullptr,
+        capturedD2DBitmap_.GetAddressOf()
+    );
+
+    if (FAILED(result)) {
+        capturedD2DBitmap_.Reset();
+
+        error = makeRenderError(
+            L"Direct2D bitmap creation from PBGRA",
+            result
+        );
+
+        return false;
+    }
+
+    InvalidateRect(window_, nullptr, FALSE);
+
+    return true;
 }
 
 } // namespace windows_snip

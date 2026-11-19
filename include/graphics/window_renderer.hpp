@@ -6,6 +6,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
+#include <wincodec.h>
 
 #include <string>
 
@@ -27,8 +28,13 @@ public:
 
     void Render();
     void Resize(UINT width, UINT height);
-    void HandleMouseButtonUp(float x, float y);
+    bool HandleMouseButtonUp(float x, float y);
     void Shutdown() noexcept;
+    bool SetCapturedImage(
+        IWICBitmap* bitmap,
+        IWICImagingFactory* wicFactory,
+        std::wstring& error
+    );
 
     bool IsInitialized() const noexcept;
 
@@ -54,6 +60,12 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextFormat> messageTextFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> captionTextFormat_;
 
+    // Original WIC image survives Direct2D target recreation.
+    Microsoft::WRL::ComPtr<IWICBitmap> capturedImageSource_;
+
+    // Direct2D representation used for rendering.
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> capturedD2DBitmap_;
+
     HWND window_ = nullptr;
 
     bool videoModeSelected_ = false;
@@ -63,7 +75,8 @@ private:
         Rectangle,
         Window,
         FullScreen,
-        Freeform
+        Freeform,
+        Scroll
     };
 
     CaptureMode captureMode_ = CaptureMode::Rectangle;
