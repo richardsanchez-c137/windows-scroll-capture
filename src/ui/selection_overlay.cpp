@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <cstdlib>
 
 #include <windowsx.h>
 
@@ -19,6 +20,7 @@ constexpr DWORD OVERLAY_ALPHA = 165;
 constexpr DWORD SELECTION_BORDER_COLOR = 0xFF3291FF;
 constexpr int BORDER_THICKNESS = 2;
 constexpr int MIN_SELECTION_SIZE = 4;
+constexpr int SELECTION_ESCAPE_HOTKEY_ID = 0x5342;
 
 std::wstring makeWin32Error(const wchar_t* operation) {
     return std::wstring(operation) +
@@ -26,6 +28,63 @@ std::wstring makeWin32Error(const wchar_t* operation) {
         std::to_wstring(GetLastError());
 }
 
+struct WindowHitTestContext {
+    POINT screenPosition{};
+    DWORD currentProcessId = 0;
+    HWND targetWindow = nullptr;
+    RECT targetRect{};
+};
+
+BOOL CALLBACK EnumerateWindowAtPoint(
+    HWND candidate,
+    LPARAM parameter
+) {
+    auto* context =
+        reinterpret_cast<WindowHitTestContext*>(parameter);
+
+    if (!context || !IsWindowVisible(candidate)) {
+        return TRUE;
+    }
+
+    if (candidate == GetDesktopWindow() ||
+        candidate == GetShellWindow()) {
+        return TRUE;
+    }
+
+    // Exclude our own application, including the selection overlay.
+    DWORD processId = 0;
+
+    GetWindowThreadProcessId(candidate, &processId);
+
+    if (processId == context->currentProcessId) {
+        return TRUE;
+    }
+
+    if (IsIconic(candidate)) {
+        return TRUE;
+    }
+
+    RECT bounds{};
+
+    if (!GetWindowRect(candidate, &bounds)) {
+        return TRUE;
+    }
+
+    const POINT point = context->screenPosition;
+
+    if (point.x < bounds.left ||
+        point.x >= bounds.right ||
+        point.y < bounds.top ||
+        point.y >= bounds.bottom) {
+        return TRUE;
+    }
+
+    context->targetWindow = candidate;
+    context->targetRect = bounds;
+
+    // Stop at the first eligible window in the Z-order.
+    return FALSE;
+}
 } // namespace
 
 SelectionOverlay::~SelectionOverlay() {
@@ -158,11 +217,19 @@ void SelectionOverlay::DestroySurface() noexcept {
 
 bool SelectionOverlay::Start(
     HWND owner,
-    std::wstring& error
+    std::wstring& error,
+    SelectionMode mode
 ) {
     error.clear();
 
     Shutdown();
+    selectionMode_ = mode;
+
+    hoveredWindow_ = nullptr;
+    selectedWindow_ = nullptr;
+    freeformScreenPoints_.clear();
+    hoveredWindowRect_ = {};
+    freeformScreenPoints_.clear();
 
     if (!owner || !IsWindow(owner)) {
         error = L"Invalid owner window.";
@@ -178,7 +245,6 @@ bool SelectionOverlay::Start(
 
     virtualWidth_ = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     virtualHeight_ = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
     if (!RegisterWindowClass(error)) {
         Shutdown();
         return false;
@@ -200,7 +266,7 @@ bool SelectionOverlay::Start(
         virtualOrigin_.y,
         virtualWidth_,
         virtualHeight_,
-        owner_,
+        nullptr,
         nullptr,
         instance_,
         this
@@ -215,6 +281,19 @@ bool SelectionOverlay::Start(
     active_ = true;
     dragging_ = false;
     hasSelection_ = false;
+    // Register Escape independently of keyboard focus.
+    if (!RegisterHotKey(
+        window_,
+        SELECTION_ESCAPE_HOTKEY_ID,
+        MOD_NOREPEAT,
+        VK_ESCAPE
+    )) {
+        error = makeWin32Error(L"RegisterHotKey(Escape)");
+        Shutdown();
+        return false;
+    }
+
+    escapeHotKeyRegistered_ = true;
     selectionClient_ = {};
     selectionScreen_ = {};
 
@@ -235,6 +314,14 @@ void SelectionOverlay::Shutdown() noexcept {
     dragging_ = false;
 
     HWND oldWindow = window_;
+    if (oldWindow && escapeHotKeyRegistered_) {
+    UnregisterHotKey(
+        oldWindow,
+        SELECTION_ESCAPE_HOTKEY_ID
+    );
+
+    escapeHotKeyRegistered_ = false;
+}
 
     if (oldWindow && GetCapture() == oldWindow) {
         ReleaseCapture();
@@ -268,7 +355,13 @@ bool SelectionOverlay::IsActive() const noexcept {
 RECT SelectionOverlay::GetSelectionScreenRect() const noexcept {
     return selectionScreen_;
 }
-
+HWND SelectionOverlay::GetSelectedWindow() const noexcept {
+    return selectedWindow_;
+}
+const std::vector<POINT>&
+SelectionOverlay::GetFreeformSelectionScreenPoints() const noexcept {
+    return freeformScreenPoints_;
+}
 // ============================================================
 // Rendering
 // ============================================================
@@ -287,10 +380,11 @@ void SelectionOverlay::RenderOverlay() {
 
     std::fill_n(pixels_, pixelCount, dimColor);
 
-    // Make the selected area completely transparent.
-    // Mouse capture keeps dragging active while the pointer
-    // moves across this transparent region.
-    if (hasSelection_) {
+    // Keep the selected area visually transparent while
+    // retaining mouse hit-testing through the layered window.
+    // Zero alpha would pass mouse messages to the window underneath.
+    if (hasSelection_ &&
+        selectionMode_ != SelectionMode::Freeform) {
         const int left = (std::max)(0L, selectionClient_.left);
         const int top = (std::max)(0L, selectionClient_.top);
         const int right = (std::min)(
@@ -309,7 +403,7 @@ void SelectionOverlay::RenderOverlay() {
             std::fill(
                 pixels_ + offset,
                 pixels_ + offset + (right - left),
-                0x00000000
+                0x01000000
             );
         }
 
@@ -344,6 +438,73 @@ void SelectionOverlay::RenderOverlay() {
         }
     }
 
+    // Draw the freeform lasso boundary.
+    if (selectionMode_ == SelectionMode::Freeform &&
+        !freeformScreenPoints_.empty()) {
+
+        auto setPixel = [&](int x, int y) {
+            if (x >= 0 && x < virtualWidth_ &&
+                y >= 0 && y < virtualHeight_) {
+
+                pixels_[
+                    static_cast<std::size_t>(y) * virtualWidth_ + x
+                ] = SELECTION_BORDER_COLOR;
+            }
+        };
+
+        auto drawLine = [&](POINT from, POINT to) {
+            int x0 = from.x - virtualOrigin_.x;
+            int y0 = from.y - virtualOrigin_.y;
+            const int x1 = to.x - virtualOrigin_.x;
+            const int y1 = to.y - virtualOrigin_.y;
+
+            const int dx = std::abs(x1 - x0);
+            const int sx = x0 < x1 ? 1 : -1;
+            const int dy = -std::abs(y1 - y0);
+            const int sy = y0 < y1 ? 1 : -1;
+
+            int error = dx + dy;
+
+            while (true) {
+                setPixel(x0, y0);
+                setPixel(x0 + 1, y0);
+
+                if (x0 == x1 && y0 == y1) {
+                    break;
+                }
+
+                const int twiceError = 2 * error;
+
+                if (twiceError >= dy) {
+                    error += dy;
+                    x0 += sx;
+                }
+
+                if (twiceError <= dx) {
+                    error += dx;
+                    y0 += sy;
+                }
+            }
+        };
+
+        for (std::size_t i = 1;
+            i < freeformScreenPoints_.size();
+            ++i) {
+
+            drawLine(
+                freeformScreenPoints_[i - 1],
+                freeformScreenPoints_[i]
+            );
+        }
+
+        // Close the lasso when the selection is complete.
+        if (hasSelection_ && freeformScreenPoints_.size() >= 3) {
+            drawLine(
+                freeformScreenPoints_.back(),
+                freeformScreenPoints_.front()
+            );
+        }
+    }
     POINT destination{
         virtualOrigin_.x,
         virtualOrigin_.y
@@ -447,6 +608,180 @@ void SelectionOverlay::UpdateSelection(
     hasSelection_ = true;
 }
 
+void SelectionOverlay::UpdateFreeformSelection(
+    POINT currentPosition
+) {
+    if (virtualWidth_ <= 0 || virtualHeight_ <= 0) {
+        return;
+    }
+
+    const LONG x = std::clamp<LONG>(
+        currentPosition.x,
+        0,
+        virtualWidth_ - 1
+    );
+
+    const LONG y = std::clamp<LONG>(
+        currentPosition.y,
+        0,
+        virtualHeight_ - 1
+    );
+
+    const POINT screenPoint{
+        virtualOrigin_.x + x,
+        virtualOrigin_.y + y
+    };
+
+    // Avoid storing excessive points when the mouse barely moves.
+    if (!freeformScreenPoints_.empty()) {
+        const POINT& previous = freeformScreenPoints_.back();
+
+        const long long dx =
+            static_cast<long long>(screenPoint.x) - previous.x;
+
+        const long long dy =
+            static_cast<long long>(screenPoint.y) - previous.y;
+
+        if (dx * dx + dy * dy < 4LL) {
+            return;
+        }
+    }
+
+    freeformScreenPoints_.push_back(screenPoint);
+
+    LONG minX = screenPoint.x;
+    LONG minY = screenPoint.y;
+    LONG maxX = screenPoint.x;
+    LONG maxY = screenPoint.y;
+
+    for (const POINT& point : freeformScreenPoints_) {
+        minX = (std::min)(minX, point.x);
+        minY = (std::min)(minY, point.y);
+        maxX = (std::max)(maxX, point.x);
+        maxY = (std::max)(maxY, point.y);
+    }
+
+    selectionScreen_ = {
+        minX,
+        minY,
+        maxX + 1,
+        maxY + 1
+    };
+
+    selectionClient_ = {
+        minX - virtualOrigin_.x,
+        minY - virtualOrigin_.y,
+        maxX - virtualOrigin_.x + 1,
+        maxY - virtualOrigin_.y + 1
+    };
+
+    hasSelection_ = freeformScreenPoints_.size() >= 3;
+}
+
+HWND SelectionOverlay::FindWindowAtPoint(
+    POINT screenPosition,
+    RECT& windowRect
+) const noexcept {
+
+    windowRect = {};
+
+    WindowHitTestContext context{};
+
+    context.screenPosition = screenPosition;
+    context.currentProcessId = GetCurrentProcessId();
+
+    EnumWindows(
+        EnumerateWindowAtPoint,
+        reinterpret_cast<LPARAM>(&context)
+    );
+
+    if (!context.targetWindow) {
+        return nullptr;
+    }
+
+    windowRect = context.targetRect;
+
+    return context.targetWindow;
+}
+
+
+bool SelectionOverlay::UpdateHoveredWindow(
+    POINT currentPosition
+) {
+    const POINT screenPosition{
+        virtualOrigin_.x + currentPosition.x,
+        virtualOrigin_.y + currentPosition.y
+    };
+
+    RECT targetRect{};
+
+    HWND targetWindow = FindWindowAtPoint(
+        screenPosition,
+        targetRect
+    );
+
+    if (targetWindow == hoveredWindow_ &&
+        EqualRect(&targetRect, &hoveredWindowRect_)) {
+
+        return false;
+    }
+
+    hoveredWindow_ = targetWindow;
+    hoveredWindowRect_ = targetRect;
+
+    if (!targetWindow) {
+
+        hasSelection_ = false;
+
+        selectionClient_ = {};
+        selectionScreen_ = {};
+
+        return true;
+    }
+
+    // Clip the visible highlight to the virtual desktop.
+    const LONG left = (std::max)(
+        targetRect.left,
+        virtualOrigin_.x
+    );
+
+    const LONG top = (std::max)(
+        targetRect.top,
+        virtualOrigin_.y
+    );
+
+    const LONG right = (std::min)(
+        targetRect.right,
+        virtualOrigin_.x + virtualWidth_
+    );
+
+    const LONG bottom = (std::min)(
+        targetRect.bottom,
+        virtualOrigin_.y + virtualHeight_
+    );
+
+    selectionClient_.left =
+        left - virtualOrigin_.x;
+
+    selectionClient_.top =
+        top - virtualOrigin_.y;
+
+    selectionClient_.right =
+        right - virtualOrigin_.x;
+
+    selectionClient_.bottom =
+        bottom - virtualOrigin_.y;
+
+    selectionScreen_ = targetRect;
+
+    hasSelection_ =
+        right > left &&
+        bottom > top;
+
+    return true;
+}
+
+
 // ============================================================
 // Selection completion and cancellation
 // ============================================================
@@ -460,7 +795,14 @@ void SelectionOverlay::CompleteSelection() {
 
     HWND oldWindow = window_;
     HWND oldOwner = owner_;
+        if (oldWindow && escapeHotKeyRegistered_) {
+        UnregisterHotKey(
+            oldWindow,
+            SELECTION_ESCAPE_HOTKEY_ID
+        );
 
+        escapeHotKeyRegistered_ = false;
+    }
     active_ = false;
 
     if (oldWindow && GetCapture() == oldWindow) {
@@ -489,6 +831,11 @@ void SelectionOverlay::CancelSelection() {
     selectionClient_ = {};
     selectionScreen_ = {};
     hasSelection_ = false;
+
+    // Reset window-selection state.
+    hoveredWindow_ = nullptr;
+    selectedWindow_ = nullptr;
+    hoveredWindowRect_ = {};
 
     HWND oldWindow = window_;
     HWND oldOwner = owner_;
@@ -566,6 +913,15 @@ LRESULT SelectionOverlay::HandleMessage(
 ) {
     switch (message) {
 
+    case WM_HOTKEY:
+
+        if (wParam == SELECTION_ESCAPE_HOTKEY_ID) {
+            CancelSelection();
+            return 0;
+        }
+
+        break;
+
     case WM_ERASEBKGND:
         return 1;
 
@@ -577,7 +933,14 @@ LRESULT SelectionOverlay::HandleMessage(
     }
 
     case WM_SETCURSOR:
-        SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+        SetCursor(
+            LoadCursorW(
+                nullptr,
+                selectionMode_ == SelectionMode::Window
+                    ? IDC_HAND
+                    : IDC_CROSS
+            )
+        );
         return TRUE;
 
     case WM_KEYDOWN:
@@ -588,12 +951,43 @@ LRESULT SelectionOverlay::HandleMessage(
         break;
 
     case WM_LBUTTONDOWN: {
+
         if (!active_) {
             return 0;
         }
 
-        dragStart_.x = GET_X_LPARAM(lParam);
-        dragStart_.y = GET_Y_LPARAM(lParam);
+        POINT position{
+            GET_X_LPARAM(lParam),
+            GET_Y_LPARAM(lParam)
+        };
+
+        if (selectionMode_ == SelectionMode::Window) {
+
+            UpdateHoveredWindow(position);
+
+            dragging_ = true;
+            SetCapture(hwnd);
+
+            RenderOverlay();
+
+            return 0;
+        }
+
+        if (selectionMode_ == SelectionMode::Freeform) {
+            freeformScreenPoints_.clear();
+
+            dragging_ = true;
+            hasSelection_ = false;
+
+            SetCapture(hwnd);
+
+            UpdateFreeformSelection(position);
+            RenderOverlay();
+
+            return 0;
+        }
+
+        dragStart_ = position;
 
         dragging_ = true;
         hasSelection_ = true;
@@ -606,26 +1000,74 @@ LRESULT SelectionOverlay::HandleMessage(
         return 0;
     }
 
-    case WM_MOUSEMOVE:
-        if (dragging_) {
-            POINT position{
-                GET_X_LPARAM(lParam),
-                GET_Y_LPARAM(lParam)
-            };
+    case WM_MOUSEMOVE: {
 
+        POINT position{
+            GET_X_LPARAM(lParam),
+            GET_Y_LPARAM(lParam)
+        };
+
+        if (selectionMode_ == SelectionMode::Window) {
+
+            if (UpdateHoveredWindow(position)) {
+                RenderOverlay();
+            }
+
+            return 0;
+        }
+        if (selectionMode_ == SelectionMode::Freeform) {
+            if (dragging_) {
+                UpdateFreeformSelection(position);
+                RenderOverlay();
+            }
+
+            return 0;
+        }
+
+        if (dragging_) {
             UpdateSelection(position);
             RenderOverlay();
         }
+
         return 0;
+    }
 
-    case WM_LBUTTONUP:
-        if (dragging_) {
-            POINT position{
-                GET_X_LPARAM(lParam),
-                GET_Y_LPARAM(lParam)
-            };
+    case WM_LBUTTONUP: {
 
-            UpdateSelection(position);
+        if (!dragging_) {
+            return 0;
+        }
+
+        POINT position{
+            GET_X_LPARAM(lParam),
+            GET_Y_LPARAM(lParam)
+        };
+
+        if (selectionMode_ == SelectionMode::Window) {
+
+            UpdateHoveredWindow(position);
+
+            dragging_ = false;
+
+            if (GetCapture() == hwnd) {
+                ReleaseCapture();
+            }
+
+            if (hoveredWindow_ && hasSelection_) {
+
+                selectedWindow_ = hoveredWindow_;
+
+                CompleteSelection();
+            }
+            else {
+                RenderOverlay();
+            }
+
+            return 0;
+        }
+        if (selectionMode_ == SelectionMode::Freeform) {
+            UpdateFreeformSelection(position);
+
             dragging_ = false;
 
             if (GetCapture() == hwnd) {
@@ -638,18 +1080,55 @@ LRESULT SelectionOverlay::HandleMessage(
             const LONG height =
                 selectionClient_.bottom - selectionClient_.top;
 
-            if (width >= MIN_SELECTION_SIZE &&
+            if (freeformScreenPoints_.size() >= 3 &&
+                width >= MIN_SELECTION_SIZE &&
                 height >= MIN_SELECTION_SIZE) {
+
+                hasSelection_ = true;
+                RenderOverlay();
                 CompleteSelection();
             }
             else {
                 hasSelection_ = false;
+                freeformScreenPoints_.clear();
                 selectionClient_ = {};
                 selectionScreen_ = {};
+
                 RenderOverlay();
             }
+
+            return 0;
         }
+
+        UpdateSelection(position);
+
+        dragging_ = false;
+
+        if (GetCapture() == hwnd) {
+            ReleaseCapture();
+        }
+
+        const LONG width =
+            selectionClient_.right - selectionClient_.left;
+
+        const LONG height =
+            selectionClient_.bottom - selectionClient_.top;
+
+        if (width >= MIN_SELECTION_SIZE &&
+            height >= MIN_SELECTION_SIZE) {
+
+            CompleteSelection();
+        }
+        else {
+            hasSelection_ = false;
+            selectionClient_ = {};
+            selectionScreen_ = {};
+
+            RenderOverlay();
+        }
+
         return 0;
+    }
 
     case WM_CAPTURECHANGED:
         if (dragging_) {
@@ -658,6 +1137,7 @@ LRESULT SelectionOverlay::HandleMessage(
             selectionClient_ = {};
             selectionScreen_ = {};
             RenderOverlay();
+            freeformScreenPoints_.clear();
         }
         return 0;
 

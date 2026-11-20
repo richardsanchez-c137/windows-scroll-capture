@@ -36,7 +36,12 @@ add_executable(WindowsSnipTool WIN32
     src/logger.cpp
     src/ui/selection_overlay.cpp
     src/capture/monitor_capture.cpp
+    src/capture/scroll_capture_worker.cpp
     src/image/image_exporter.cpp
+    src/image/image_stitcher.cpp
+    src/image/wic_pixel_bridge.cpp
+    src/capture/window_capture.cpp
+    src/capture/scrollable_region_finder.cpp
 )
 target_include_directories(WindowsSnipTool PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -101,3 +106,27 @@ message(STATUS " Version: ${PROJECT_VERSION}")
 message(STATUS " C++ Standard: C++20")
 message(STATUS " Architecture: x64")
 message(STATUS "==========================================")
+
+include(CTest)
+
+if(BUILD_TESTING)
+
+    add_executable(ImageStitcherTests
+        tests/image_stitcher_test.cpp
+        src/image/image_stitcher.cpp
+    )
+
+    target_include_directories(ImageStitcherTests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    target_compile_features(ImageStitcherTests PRIVATE
+        cxx_std_20
+    )
+
+    add_test(
+        NAME ImageStitcherSyntheticTests
+        COMMAND ImageStitcherTests
+    )
+
+endif()

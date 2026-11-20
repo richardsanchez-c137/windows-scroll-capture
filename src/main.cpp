@@ -9,6 +9,10 @@
 #include "ui/selection_overlay.hpp"
 #include "capture/monitor_capture.hpp"
 #include "image/image_exporter.hpp"
+#include "capture/scroll_capture_worker.hpp"
+#include "image/wic_pixel_bridge.hpp"
+#include "capture/window_capture.hpp"
+
 
 
 namespace {
@@ -22,6 +26,7 @@ constexpr wchar_t WINDOW_TITLE[] =
 constexpr COLORREF BACKGROUND_COLOR =
     RGB(24, 27, 33);
 
+constexpr int SCROLL_CANCEL_HOTKEY_ID = 0x5343;
 struct MainWindowContext {
     windows_snip::WindowRenderer* renderer = nullptr;
     windows_snip::SelectionOverlay* selectionOverlay = nullptr;
@@ -31,7 +36,206 @@ struct MainWindowContext {
     windows_snip::MonitorCapture* monitorCapture = nullptr;
     windows_snip::MonitorCaptureResult* latestCapture = nullptr;
     windows_snip::ImageExporter* imageExporter;
+    windows_snip::ScrollCaptureWorker* scrollCaptureWorker = nullptr;
 };
+HWND FindScrollTargetWindow(
+    const RECT& viewport,
+    HWND applicationWindow,
+    std::wstring& error
+) {
+    error.clear();
+
+    POINT center{
+        viewport.left + (viewport.right - viewport.left) / 2,
+        viewport.top + (viewport.bottom - viewport.top) / 2
+    };
+
+    HWND hitWindow = WindowFromPoint(center);
+
+    if (!hitWindow) {
+        error = L"No application window was found beneath the selection.";
+        return nullptr;
+    }
+
+    HWND targetWindow = GetAncestor(hitWindow, GA_ROOT);
+
+    if (!targetWindow) {
+        targetWindow = hitWindow;
+    }
+
+    if (!IsWindow(targetWindow) ||
+        !IsWindowVisible(targetWindow)) {
+
+        error = L"The selected target window is not available.";
+        return nullptr;
+    }
+
+    if (targetWindow == applicationWindow ||
+        targetWindow == GetDesktopWindow()) {
+
+        error = L"Select a region inside another application.";
+        return nullptr;
+    }
+
+    DWORD processId = 0;
+
+    GetWindowThreadProcessId(targetWindow, &processId);
+
+    if (processId == 0 ||
+        processId == GetCurrentProcessId()) {
+
+        error = L"Could not identify an external target application.";
+        return nullptr;
+    }
+
+    return targetWindow;
+}
+
+void RestoreMainWindow(HWND hwnd) noexcept {
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    UpdateWindow(hwnd);
+}
+
+
+void FinishScrollCapture(
+    HWND hwnd,
+    MainWindowContext* context,
+    bool cancelled
+) {
+    UnregisterHotKey(hwnd, SCROLL_CANCEL_HOTKEY_ID);
+
+    if (!context || !context->scrollCaptureWorker) {
+        RestoreMainWindow(hwnd);
+        return;
+    }
+
+    windows_snip::PixelFrame stitchedImage;
+    std::wstring error;
+
+    if (!context->scrollCaptureWorker->TakeResult(
+        stitchedImage,
+        error
+    )) {
+
+        if (cancelled &&
+            context->scrollCaptureWorker->GetCapturedFrameCount() == 0) {
+
+            error = L"Scrolling capture was cancelled before the first frame.";
+        }
+
+        RestoreMainWindow(hwnd);
+
+        if (!error.empty()) {
+            ShowWindow(hwnd, SW_SHOWNORMAL);
+            UpdateWindow(hwnd);
+            MessageBoxW(
+                hwnd,
+                error.c_str(),
+                WINDOW_TITLE,
+                MB_OK | MB_ICONINFORMATION
+            );
+        }
+
+        return;
+    }
+
+    if (!context->graphics ||
+        !context->latestCapture ||
+        !context->renderer) {
+
+        RestoreMainWindow(hwnd);
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<IWICBitmap> resultBitmap;
+
+    if (!windows_snip::PixelFrameToWicBitmap(
+        context->graphics->GetWICFactory(),
+        stitchedImage,
+        resultBitmap,
+        error
+    )) {
+        RestoreMainWindow(hwnd);
+
+        MessageBoxW(
+            hwnd,
+            error.c_str(),
+            WINDOW_TITLE,
+            MB_OK | MB_ICONERROR
+        );
+
+        return;
+    }
+
+    // Store the stitched result in the existing capture structure.
+    context->latestCapture->Reset();
+
+    context->latestCapture->bitmap = resultBitmap;
+    context->latestCapture->width = stitchedImage.width;
+    context->latestCapture->height = stitchedImage.height;
+
+    if (context->selectionOverlay) {
+        context->latestCapture->screenRect =
+            context->selectionOverlay->GetSelectionScreenRect();
+    }
+
+    std::wstring previewError;
+
+    const bool previewReady =
+        context->renderer->SetCapturedImage(
+            resultBitmap.Get(),
+            context->graphics->GetWICFactory(),
+            previewError
+        );
+
+    RestoreMainWindow(hwnd);
+
+    if (!previewReady) {
+        MessageBoxW(
+            hwnd,
+            previewError.c_str(),
+            WINDOW_TITLE,
+            MB_OK | MB_ICONERROR
+        );
+        return;
+    }
+
+    OutputDebugStringW(
+        cancelled
+            ? L"Scrolling capture cancelled. Partial image retained.\n"
+            : L"Scrolling capture completed successfully.\n"
+    );
+}
+
+
+void HandleScrollFailure(
+    HWND hwnd,
+    MainWindowContext* context
+) {
+    UnregisterHotKey(hwnd, SCROLL_CANCEL_HOTKEY_ID);
+
+    std::wstring error =
+        L"Scrolling capture failed unexpectedly.";
+
+    if (context && context->scrollCaptureWorker) {
+        std::wstring workerError;
+
+        if (context->scrollCaptureWorker->GetError(workerError)) {
+            error = workerError;
+        }
+
+        context->scrollCaptureWorker->Join();
+    }
+
+    RestoreMainWindow(hwnd);
+
+    MessageBoxW(
+        hwnd,
+        error.c_str(),
+        WINDOW_TITLE,
+        MB_OK | MB_ICONERROR
+    );
+}
 
 LRESULT CALLBACK MainWindowProc(
     HWND hwnd,
@@ -45,6 +249,58 @@ LRESULT CALLBACK MainWindowProc(
         );
 
     switch (message) {
+    case WM_HOTKEY:
+
+        if (wParam == SCROLL_CANCEL_HOTKEY_ID) {
+
+            UnregisterHotKey(
+                hwnd,
+                SCROLL_CANCEL_HOTKEY_ID
+            );
+
+            if (context && context->scrollCaptureWorker) {
+                context->scrollCaptureWorker->Cancel();
+            }
+
+            OutputDebugStringW(
+                L"Scrolling capture cancellation requested.\n"
+            );
+
+            return 0;
+        }
+
+        break;
+
+
+    case windows_snip::WM_APP_SCROLL_PROGRESS:
+    {
+        const std::wstring progress =
+            L"Scroll capture frame count: " +
+            std::to_wstring(static_cast<unsigned int>(wParam)) +
+            L"\n";
+
+        OutputDebugStringW(progress.c_str());
+
+        return 0;
+    }
+
+
+    case windows_snip::WM_APP_SCROLL_COMPLETED:
+
+        FinishScrollCapture(hwnd, context, false);
+        return 0;
+
+
+    case windows_snip::WM_APP_SCROLL_CANCELLED:
+
+        FinishScrollCapture(hwnd, context, true);
+        return 0;
+
+
+    case windows_snip::WM_APP_SCROLL_FAILED:
+
+        HandleScrollFailure(hwnd, context);
+        return 0;
 
     case WM_ERASEBKGND:
         return 1;
@@ -104,9 +360,41 @@ LRESULT CALLBACK MainWindowProc(
             windows_snip::WindowRenderer::ToolbarAction::StartCapture) {
 
             if (context->selectionOverlay) {
+
+                const bool scrollMode =
+                    context->renderer->IsScrollCaptureSelected();
+
+                const bool freeformSelectionMode =
+                    context->renderer->IsFreeformCaptureSelected();
+
+                const bool windowSelectionMode =
+                    scrollMode ||
+                    context->renderer->IsWindowCaptureSelected();
+
+                const bool hideMainWindow =
+                    windowSelectionMode || freeformSelectionMode;
+
+                if (hideMainWindow) {
+                    ShowWindow(hwnd, SW_HIDE);
+                }
+
                 std::wstring error;
 
-                if (!context->selectionOverlay->Start(hwnd, error)) {
+                if (!context->selectionOverlay->Start(
+                    hwnd,
+                    error,
+                    windowSelectionMode
+                        ? windows_snip::SelectionOverlay::SelectionMode::Window
+                        : freeformSelectionMode
+                            ? windows_snip::SelectionOverlay::SelectionMode::Freeform
+                            : windows_snip::SelectionOverlay::SelectionMode::Rectangle
+                )) {
+
+                    if (hideMainWindow) {
+                        ShowWindow(hwnd, SW_SHOWNORMAL);
+                        UpdateWindow(hwnd);
+                    }
+
                     MessageBoxW(
                         hwnd,
                         error.c_str(),
@@ -217,10 +505,211 @@ LRESULT CALLBACK MainWindowProc(
             context->captureRuntime &&
             context->graphics &&
             context->monitorCapture &&
-            context->latestCapture) {
+            context->latestCapture &&
+            context->renderer) {
 
             const RECT selection =
                 context->selectionOverlay->GetSelectionScreenRect();
+
+            // ----------------------------------------------------
+            // SCROLL CAPTURE
+            // ----------------------------------------------------
+
+            if (context->renderer->IsScrollCaptureSelected()) {
+
+                std::wstring error;
+
+                HWND targetWindow =
+                    context->selectionOverlay->GetSelectedWindow();
+
+                RECT targetWindowRect{};
+
+                if (!targetWindow ||
+                    !IsWindow(targetWindow) ||
+                    !GetWindowRect(targetWindow, &targetWindowRect)) {
+
+                    error = L"The selected application window is no longer available.";
+
+                    ShowWindow(hwnd, SW_SHOWNORMAL);
+                    UpdateWindow(hwnd);
+
+                    MessageBoxW(
+                        hwnd,
+                        error.c_str(),
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+
+                    return 0;
+                }
+
+                // Register Escape while the scroll session is active.
+                if (!RegisterHotKey(
+                    hwnd,
+                    SCROLL_CANCEL_HOTKEY_ID,
+                    MOD_NOREPEAT,
+                    VK_ESCAPE
+                )) {
+
+                    error =
+                        L"Could not register Escape for cancellation. "
+                        L"Windows error: " +
+                        std::to_wstring(GetLastError());
+
+                    ShowWindow(hwnd, SW_SHOWNORMAL);
+                    UpdateWindow(hwnd);
+
+                    MessageBoxW(
+                        hwnd,
+                        error.c_str(),
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+
+                    return 0;
+                }
+
+                if (!context->scrollCaptureWorker ||
+                    !context->scrollCaptureWorker->Start(
+                        hwnd,
+                        targetWindow,
+                        targetWindowRect,
+                        error
+                    )) {
+
+                    UnregisterHotKey(
+                        hwnd,
+                        SCROLL_CANCEL_HOTKEY_ID
+                    );
+
+                    ShowWindow(hwnd, SW_SHOWNORMAL);
+                    UpdateWindow(hwnd);
+
+                    MessageBoxW(
+                        hwnd,
+                        error.c_str(),
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+
+                    return 0;
+                }
+
+                OutputDebugStringW(
+                    L"Scrolling capture worker started.\n"
+                );
+
+                return 0;
+            }
+
+            // ----------------------------------------------------
+            // WINDOW CAPTURE
+            // ----------------------------------------------------
+
+            if (context->renderer->IsWindowCaptureSelected()) {
+
+                HWND targetWindow =
+                    context->selectionOverlay->GetSelectedWindow();
+
+                if (!targetWindow ||
+                    !IsWindow(targetWindow) ||
+                    !IsWindowVisible(targetWindow) ||
+                    IsIconic(targetWindow)) {
+
+                    RestoreMainWindow(hwnd);
+
+                    MessageBoxW(
+                        hwnd,
+                        L"The selected application window is no longer available.",
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+
+                    return 0;
+                }
+
+                std::wstring captureError;
+
+                windows_snip::WindowCapture windowCapture;
+
+                windows_snip::WindowCaptureResult windowResult;
+
+                // Capture the complete selected application window.
+                if (!windowCapture.CaptureWindow(
+                    *context->captureRuntime,
+                    *context->graphics,
+                    targetWindow,
+                    windowResult,
+                    captureError
+                )) {
+
+                    RestoreMainWindow(hwnd);
+
+                    MessageBoxW(
+                        hwnd,
+                        captureError.c_str(),
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+
+                    return 0;
+                }
+
+                if (!windowResult.bitmap) {
+
+                    RestoreMainWindow(hwnd);
+
+                    MessageBoxW(
+                        hwnd,
+                        L"Window capture completed without producing an image.",
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+
+                    return 0;
+                }
+
+                // Store the captured window using the existing screenshot structure.
+                context->latestCapture->Reset();
+
+                context->latestCapture->bitmap = windowResult.bitmap;
+                context->latestCapture->width = windowResult.width;
+                context->latestCapture->height = windowResult.height;
+                context->latestCapture->screenRect = windowResult.windowRect;
+
+                // Update the preview.
+                std::wstring previewError;
+
+                const bool previewReady =
+                    context->renderer->SetCapturedImage(
+                        windowResult.bitmap.Get(),
+                        context->graphics->GetWICFactory(),
+                        previewError
+                    );
+
+                RestoreMainWindow(hwnd);
+
+                if (!previewReady) {
+
+                    MessageBoxW(
+                        hwnd,
+                        previewError.c_str(),
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+
+                    return 0;
+                }
+
+                OutputDebugStringW(
+                    L"Window capture completed successfully.\n"
+                );
+
+                return 0;
+            }
+            // ----------------------------------------------------
+            // NORMAL SCREENSHOT CAPTURE
+            // ----------------------------------------------------
 
             std::wstring captureError;
 
@@ -232,6 +721,9 @@ LRESULT CALLBACK MainWindowProc(
                     *context->latestCapture,
                     captureError
                 );
+                // Restore the main application after the screen has
+                // been captured, so the application can display its preview.
+                RestoreMainWindow(hwnd);
 
             if (!success) {
                 MessageBoxW(
@@ -255,6 +747,38 @@ LRESULT CALLBACK MainWindowProc(
                 return 0;
             }
 
+            // Apply a real polygon alpha mask to Freeform captures.
+            if (context->renderer->IsFreeformCaptureSelected()) {
+                Microsoft::WRL::ComPtr<IWICBitmap> maskedBitmap;
+                std::wstring maskError;
+
+                const bool maskApplied =
+                    windows_snip::ApplyFreeformAlphaMask(
+                        context->latestCapture->bitmap.Get(),
+                        context->graphics->GetWICFactory(),
+                        context->selectionOverlay->GetFreeformSelectionScreenPoints(),
+                        selection,
+                        maskedBitmap,
+                        maskError
+                    );
+
+                if (!maskApplied) {
+                    RestoreMainWindow(hwnd);
+
+                    MessageBoxW(
+                        hwnd,
+                        maskError.c_str(),
+                        WINDOW_TITLE,
+                        MB_OK | MB_ICONERROR
+                    );
+
+                    return 0;
+                }
+
+                // Replace the rectangular bitmap with the masked bitmap.
+                context->latestCapture->bitmap = maskedBitmap;
+            }
+
             std::wstring previewError;
 
             if (!context->renderer->SetCapturedImage(
@@ -272,11 +796,14 @@ LRESULT CALLBACK MainWindowProc(
         }
 
         return 0;
-
     case windows_snip::WM_APP_SELECTION_CANCELLED:
+
+        RestoreMainWindow(hwnd);
+
         OutputDebugStringW(
             L"Screen selection cancelled.\n"
         );
+
         return 0;
 
     case WM_KEYDOWN:
@@ -508,6 +1035,7 @@ int WINAPI wWinMain(
     windows_snip::CaptureRuntime captureRuntime;
     windows_snip::MonitorCapture monitorCapture;
     windows_snip::MonitorCaptureResult latestCapture;
+    windows_snip::ScrollCaptureWorker scrollCaptureWorker;
 
     std::wstring captureError;
 
@@ -657,7 +1185,8 @@ int WINAPI wWinMain(
             &graphics,
             &monitorCapture,
             &latestCapture,
-            &imageExporter
+            &imageExporter,
+            &scrollCaptureWorker
         };
     HWND hwnd = CreateWindowExW(
         0,
@@ -741,6 +1270,11 @@ int WINAPI wWinMain(
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+
+    UnregisterHotKey(hwnd, SCROLL_CANCEL_HOTKEY_ID);
+
+    scrollCaptureWorker.Cancel();
+    scrollCaptureWorker.Join();
 
     // 9. Release application resources.
     UnregisterClassW(WINDOW_CLASS_NAME, instance);

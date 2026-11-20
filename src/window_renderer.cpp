@@ -1302,8 +1302,16 @@ bool WindowRenderer::IsInitialized() const noexcept {
         messageTextFormat_ != nullptr &&
         captionTextFormat_ != nullptr;
 }
+bool WindowRenderer::IsScrollCaptureSelected() const noexcept {
+    return captureMode_ == CaptureMode::Scroll;
+}
+bool WindowRenderer::IsWindowCaptureSelected() const noexcept {
+    return captureMode_ == CaptureMode::Window;
 
-
+}
+bool WindowRenderer::IsFreeformCaptureSelected() const noexcept {
+    return captureMode_ == CaptureMode::Freeform;
+}
 bool WindowRenderer::SetCapturedImage(
     IWICBitmap* bitmap,
     IWICImagingFactory* wicFactory,

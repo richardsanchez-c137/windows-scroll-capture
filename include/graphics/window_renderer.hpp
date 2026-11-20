@@ -43,6 +43,9 @@ public:
     );
 
     bool IsInitialized() const noexcept;
+    bool IsScrollCaptureSelected() const noexcept;
+    bool IsWindowCaptureSelected() const noexcept;
+    bool IsFreeformCaptureSelected() const noexcept;
 
 private:
     bool CreateDeviceResources(std::wstring& error);
